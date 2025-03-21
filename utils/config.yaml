@@ -1,0 +1,153 @@
+# # # # # # # # # # # > > > DEFAULTS < < < # # # # # # # # # # #
+defaults:
+- data: zarr
+- dataloader: native_grid
+- diagnostics: evaluation
+- hardware: example
+- graph: multi_scale
+- model: transformer
+- training: default
+- _self_
+# # # # # # # # # # # < < < DEFAULTS > > > # # # # # # # # # # #
+
+# # # # # # # # # # # > > > DATA < < < # # # # # # # # # # #
+data:
+  frequency: 1d
+  timestep: 1d
+  forcing:
+  - cos_julian_day
+  - sin_julian_day
+  - cos_latitude
+  - sin_latitude
+  diagnostic: []
+  normalizer:
+    std: []
+    min-max: []
+    max: []
+    residual: []
+    none:
+    - cos_julian_day
+    - sin_julian_day
+    - cos_latitude
+    - sin_latitude
+    - cos_longitude
+    - sin_longitude
+# # # # # # # # # # # < < < DATA > > > # # # # # # # # # # #
+
+# # # # # # # # # # # > > > DATALOADER < < < # # # # # # # # # # #
+dataloader:
+  training:
+    start: null
+    end: 1850-06-15
+  validation:
+    start: 1850-06-16
+    end: 1850-06-25
+  test:
+    dataset: ${dataloader.dataset}
+    start: 1850-06-26
+    end: null
+# # # # # # # # # # # < < < DATALOADER > > > # # # # # # # # # # #
+
+# # # # # # # # # # # > > > DIAGNOSTICS < < < # # # # # # # # # # #
+diagnostics:
+  plot:
+    datashader: False
+    parameters:
+    - tas
+    callbacks:
+    - _target_: anemoi.training.diagnostics.callbacks.plot.GraphTrainableFeaturesPlot
+      every_n_epochs: 1
+    - _target_: anemoi.training.diagnostics.callbacks.plot.PlotLoss
+      parameter_groups:
+        moisture: []
+        sfc_wind: []
+    - _target_: anemoi.training.diagnostics.callbacks.plot.PlotSample
+      sample_idx: ${diagnostics.plot.sample_idx}
+      per_sample : 6
+      parameters: ${diagnostics.plot.parameters}
+      accumulation_levels_plot: [0, 0.05, 0.1, 0.25, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 7, 100]
+      cmap_accumulation:
+      - "#ffffff"
+      - "#04e9e7"
+      - "#019ff4"
+      - "#0300f4"
+      - "#02fd02"
+      - "#01c501"
+      - "#008e00"
+      - "#fdf802"
+      - "#e5bc00"
+      - "#fd9500"
+      - "#fd0000"
+      - "#d40000"
+      - "#bc0000"
+      - "#f800fd"
+      precip_and_related_fields: []
+    - _target_: anemoi.training.diagnostics.callbacks.plot.PlotSpectrum
+      sample_idx: ${diagnostics.plot.sample_idx}
+      parameters: ${diagnostics.plot.parameters}
+    - _target_: anemoi.training.diagnostics.callbacks.plot.PlotHistogram
+      sample_idx: ${diagnostics.plot.sample_idx}
+      precip_and_related_fields: []
+      parameters: ${diagnostics.plot.parameters}
+# # # # # # # # # # # < < < DIAGNOSTICS > > > # # # # # # # # # # #
+
+# # # # # # # # # # # > > > HARDWARE < < < # # # # # # # # # # #
+hardware:
+  paths:
+    data: source/
+    output: output/
+  files:
+    dataset: cesm-tas.zarr
+    graph: cesm.pt
+# # # # # # # # # # # < < < HARDWARE > > > # # # # # # # # # # #
+
+# # # # # # # # # # # > > > GRAPH < < < # # # # # # # # # # #
+graph:
+  overwrite: True
+  nodes:
+    hidden:
+      node_builder:
+        resolution: 2
+# # # # # # # # # # # < < < GRAPH > > > # # # # # # # # # # #
+
+# # # # # # # # # # # > > > MODEL < < < # # # # # # # # # # #
+model:
+  num_channels: 64
+  processor:
+    num_layers: 4
+    num_chunks: 2
+    mlp_hidden_ratio: 4
+    num_heads: 4
+    window_size: 64
+    attention_implementation: scaled_dot_product_attention
+    softcap: 0.0
+    use_alibi_slopes: False
+  trainable_parameters:
+    data: 2
+    hidden: 2
+    data2hidden: 2
+    hidden2data: 2
+  bounding: []
+# # # # # # # # # # # < < < MODEL > > > # # # # # # # # # # #
+
+# # # # # # # # # # # > > > TRAINING < < < # # # # # # # # # # #
+training:
+  training_loss:
+    _target_: anemoi.training.losses.combined.CombinedLoss
+    losses:
+    - _target_: anemoi.training.losses.mse.WeightedMSELoss
+    - _target_: anemoi.training.losses.spectral.SpectralLoss
+    loss_weights: [0.95, 0.05]
+    scalars: ['variable', 'loss_weights_mask']
+    ignore_nans: True
+    loss: power
+  rollout:
+    start: 1
+    epoch_increment: 0
+    max: 1
+  variable_loss_scaling:
+    default: 1
+    pl: {}
+    sfc: {}
+  metrics: []
+# # # # # # # # # # # < < < TRAINING > > > # # # # # # # # # # #
