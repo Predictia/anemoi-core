@@ -10,9 +10,10 @@
 
 import logging
 from abc import ABC
-from typing import Optional
+from typing import Optional, List
 
 import numpy as np
+import einops
 import torch
 from torch import Tensor
 from torch import nn
@@ -27,9 +28,11 @@ from anemoi.models.distributed.graph import shard_tensor
 from anemoi.models.distributed.khop_edges import sort_edges_1hop_sharding
 from anemoi.models.distributed.shapes import change_channels_in_shape
 from anemoi.models.distributed.shapes import get_shape_shards
+from anemoi.models.layers.spectral import RealSHT, HEALPixInverseSHT
 from anemoi.models.layers.block import GraphConvMapperBlock
 from anemoi.models.layers.block import GraphTransformerMapperBlock
 from anemoi.models.layers.graph import TrainableTensor
+from anemoi.models.layers.sfno import SFNO2HEALPixBlock
 from anemoi.models.layers.mlp import MLP
 from anemoi.utils.config import DotDict
 
@@ -739,3 +742,163 @@ class GNNBackwardMapper(BackwardMapperPostProcessMixin, GNNBaseMapper):
 
         _, x_dst = super().forward(x, batch_size, shard_shapes, model_comm_group)
         return x_dst
+
+
+class SFNO2HEALPixForwardMapper(BaseMapper):
+
+    def __init__(
+        self,
+        in_channels_src: int = 0,
+        hidden_dim: int = 128,
+        trainable_size: int = 0,
+        cpu_offload: bool = False,
+        activation: str = "GELU",
+        src_grid_size: int = 0,
+        dst_grid_size: int = 0,
+        layer_kernels: DotDict | None = None,
+        nlat: int = 0,
+        nlon: int = 0,
+        grid: str = "legendre-gauss",
+        node_order: str = "lat-lon",
+        output_order: List[int] = [],
+        operator: str = "driscoll-healy",
+        mlp_ratio: float = 2.0,
+        drop_rate: float = 0.0,
+        drop_path: float = 0.0,
+        norm_layer: str = "Identity",
+        inner_skip: str | None = None,
+        outer_skip: str | None = "Linear",
+        mix_first: bool = False,
+        mix_after: bool = True,
+        filter_bias: bool = False,
+        **_,
+    ) -> None:
+
+        super().__init__(
+            in_channels_src=in_channels_src,
+            hidden_dim=hidden_dim,
+            cpu_offload=cpu_offload,
+            activation=activation,
+        )
+
+        # Guess number of HEALPix nodes (hidden graph)
+        nside: float = (dst_grid_size / 12.0) ** (0.5)
+
+        assert nlat * nlon == src_grid_size, "Only tensor-product grids are supported (feature graph)."
+        assert nside.is_integer(), "Only HEALPix grids are supported (latent graph)."
+
+        # Define shapes for nlat * nlon -> (nlat, nlon) reshaping
+        if node_order == "lat-lon":
+            self.reshaper = (nlat, nlon)
+            self.permuter = (0, 0)
+        elif node_order == "lon-lat":
+            self.reshaper = (nlon, nlat)
+            self.permuter = (-1, -2)
+        else:
+            raise NotImplementedError("Only lat-lon or lon-lat orderings are supported.")
+        
+        # Data -> SH -> Hidden
+        fsht = RealSHT(nlat, nlon, grid)
+        isht = HEALPixInverseSHT(int(nside), fsht.lmax, fsht.mmax)
+
+        # Build layers
+        layer_kernels = layer_kernels or {}
+
+        activation = layer_kernels[activation] if activation in layer_kernels else getattr(nn, activation)
+        norm_layer = layer_kernels[norm_layer] if norm_layer in layer_kernels else getattr(nn, norm_layer)
+        
+        # Define SFNO
+        self.proc = SFNO2HEALPixBlock(
+            forward_transform=fsht,
+            inverse_transform=isht,
+            input_dim=in_channels_src,
+            output_dim=hidden_dim,
+            operator=operator,
+            mlp_ratio=mlp_ratio,
+            drop_rate=drop_rate,
+            drop_path=drop_path,
+            activation=activation,
+            norm_layer=norm_layer,
+            inner_skip=(inner_skip or "").lower() or None,
+            outer_skip=(outer_skip or "").lower() or None,
+            mix_first=mix_first,
+            mix_after=mix_after,
+            filter_bias=filter_bias,
+            trainable=trainable_size,
+        )
+
+        # Save for later
+        self.output_order = output_order or [i for i in range(dst_grid_size)]
+
+        self.src_grid_size = src_grid_size
+        self.trainable = TrainableTensor(0, 0)
+
+        # Offload
+        self.offload_layers(cpu_offload)
+    
+    def reshape_sfno_in(
+        self,
+        x: Tensor,
+        batch_size: int,
+    ) -> Tensor:
+        
+        ensemble_size = x.shape[0] / (batch_size * self.src_grid_size)
+
+        assert ensemble_size.is_integer(), "Tensor shape doesn't match the batch and grid sizes."
+
+        return einops.rearrange(
+            tensor=x,
+            pattern="(batch ensemble grid) timevars -> batch ensemble grid timevars",
+            batch=batch_size,
+            ensemble=int(ensemble_size),
+            grid=self.src_grid_size,
+        )
+
+    def reshape_sfno_out(self, x: Tensor) -> Tensor:
+
+        x_ordered = torch.empty_like(x)
+        x_ordered[..., self.output_order, :] = x
+
+        return einops.rearrange(
+            tensor=x_ordered,
+            pattern="batch ensemble grid channels -> (batch ensemble grid) channels",
+        )
+    
+    def forward_sfno(self, x: Tensor) -> Tensor:
+    
+        x = x.transpose(-1, -2)
+
+        x = x.reshape(*x.shape[:-1], *self.reshaper)
+        x = x.transpose(*self.permuter)
+        
+        x = [
+            self.proc(x[:, e, ...])
+            for e in range(x.shape[1])
+        ]
+
+        x = torch.stack(x, dim=1)
+        x = x.transpose(-1, -2)
+
+        return x
+    
+    def forward(
+        self,
+        x: PairTensor,
+        batch_size: int,
+        shard_shapes: tuple[tuple[int], tuple[int]],
+        model_comm_group: Optional[ProcessGroup] = None,
+    ) -> PairTensor:
+        
+        assert (
+            (model_comm_group is None) or (model_comm_group.size() == 1)
+        ), "Model sharding for SFNO blocks is not supported."
+
+        x_src, x_dst, _, _ = self.pre_process(x, shard_shapes, model_comm_group)
+
+        x_src = self.reshape_sfno_in(x_src, batch_size)
+        x_dst = self.forward_sfno(x_src)
+        x_dst = self.reshape_sfno_out(x_dst)
+        
+        x_dst = self.post_process(x_dst, None, model_comm_group)
+
+        return x[0], x_dst

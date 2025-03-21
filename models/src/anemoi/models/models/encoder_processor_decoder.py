@@ -11,6 +11,7 @@
 import logging
 from typing import Optional
 
+import numpy as np
 import einops
 import torch
 from hydra.utils import instantiate
@@ -71,6 +72,19 @@ class AnemoiModelEncProcDec(nn.Module):
         # read config.model.layer_kernels to get the implementation for certain layers
         self.layer_kernels = load_layer_kernels(model_config.get("model.layer_kernels", {}))
 
+        # Guess lat-lon sizes (data graph) & node order (hidden graph)
+        x_data = self._graph_data[self._graph_name_data].x
+        x_hidden = self._graph_data[self._graph_name_hidden].x
+        sfno_kwargs = {
+            "nlat": torch.unique(x_data[:, 0]).shape[0],
+            "nlon": torch.unique(x_data[:, 1]).shape[0],
+            "output_order": np.lexsort((x_hidden[:, 1], (-1) * x_hidden[:, 0])).tolist(),
+        }
+        sfno_kwargs = (
+            sfno_kwargs if "SFNO" in model_config.model.encoder._target_
+            else {}
+        )
+
         # Encoder data -> hidden
         self.encoder = instantiate(
             model_config.model.encoder,
@@ -81,6 +95,7 @@ class AnemoiModelEncProcDec(nn.Module):
             src_grid_size=self.node_attributes.num_nodes[self._graph_name_data],
             dst_grid_size=self.node_attributes.num_nodes[self._graph_name_hidden],
             layer_kernels=self.layer_kernels,
+            **sfno_kwargs,
         )
 
         # Processor hidden -> hidden
