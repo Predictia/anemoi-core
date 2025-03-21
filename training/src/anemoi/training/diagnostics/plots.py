@@ -838,7 +838,7 @@ def plot_graph_edge_features(
     Figure
         Figure object handle
     """
-    nrows = len(trainable_modules)
+    nrows = max(len(trainable_modules), 2)
     ncols = max(tt.trainable.trainable.shape[1] for tt in trainable_modules.values())
     figsize = (ncols * 4, nrows * 3)
     fig, ax = plt.subplots(nrows, ncols, figsize=figsize, layout=LAYOUT)
