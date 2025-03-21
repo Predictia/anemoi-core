@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import functools
+import base64
 import os
 from typing import Any
 
@@ -28,7 +29,12 @@ def health_check(tracking_uri: str) -> None:
     """
     token = os.getenv("MLFLOW_TRACKING_TOKEN")
 
-    headers = {"Authorization": f"Bearer {token}"}
+    username = os.getenv("MLFLOW_TRACKING_USERNAME")
+    password = os.getenv("MLFLOW_TRACKING_PASSWORD")
+    userpass = base64.b64encode(f"{username}:{password}".encode())
+    userpass = userpass.decode()
+
+    headers = {"Authorization": f"Basic {userpass}"}
     response = requests.get(f"{tracking_uri}/health", headers=headers, timeout=60)
 
     if response.text == "OK":
