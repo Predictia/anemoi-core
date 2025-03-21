@@ -21,6 +21,7 @@ from anemoi.datasets import open_dataset
 from scipy.spatial import ConvexHull
 from scipy.spatial import SphericalVoronoi
 from scipy.spatial import Voronoi
+from scipy.spatial import distance_matrix
 from torch_geometric.data import HeteroData
 from torch_geometric.data.storage import NodeStorage
 
@@ -198,27 +199,26 @@ class SphericalAreaWeights(BaseNodeAttribute):
     def get_raw_values(self, nodes: NodeStorage, **kwargs) -> np.ndarray:
         latitudes, longitudes = nodes.x[:, 0], nodes.x[:, 1]
         points = latlon_rad_to_cartesian((np.asarray(latitudes), np.asarray(longitudes)))
-        sv = SphericalVoronoi(points, self.radius, self.centre)
-        mask = np.array([bool(i) for i in sv.regions])
-        sv.regions = [region for region in sv.regions if region]
-        # compute the area weight without empty regions
-        area_weights = sv.calculate_areas()
-        if (null_nodes := (~mask).sum()) > 0:
-            LOGGER.warning(
-                "%s is filling %d (%.2f%%) nodes with value %f",
-                self.__class__.__name__,
-                null_nodes,
-                100 * null_nodes / len(mask),
-                self.fill_value,
-            )
-        result = np.ones(points.shape[0]) * self.fill_value
-        result[mask] = area_weights
+
+        thresh = 1e-6 * self.radius
+        distan = distance_matrix(points, points)
+        unique = np.where(~ np.any(np.triu(distan < thresh, k=1), axis=0))[0]
+
+        sv = SphericalVoronoi(points[unique], self.radius, self.centre)
+        area_weights_unique = sv.calculate_areas()
+
+        area_weights = np.zeros(points.shape[0])
+        area_weights[unique] = area_weights_unique
+        area_weights = area_weights[np.argmax(distan < thresh, axis=0)]
+
+        area_weights = area_weights / np.sum(distan < thresh, axis=0)
+
         LOGGER.debug(
             "There are %d of weights, which (unscaled) add up a total weight of %.2f.",
-            len(result),
-            np.array(result).sum(),
+            len(area_weights),
+            np.array(area_weights).sum(),
         )
-        return result
+        return area_weights
 
 
 class BooleanBaseNodeAttribute(BaseNodeAttribute, ABC):
