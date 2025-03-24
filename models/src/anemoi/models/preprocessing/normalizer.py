@@ -50,17 +50,20 @@ class InputNormalizer(BasePreprocessor):
         mean = statistics["mean"]
         stdev = statistics["stdev"]
 
+        stdev_tend = statistics.get("stdev_tend", stdev)
+        stdev_tend_geom, residual_idx = 0, []
+
         # Optionally reuse statistic of one variable for another variable
         statistics_remap = {}
         for remap, source in self.remap.items():
             idx_src, idx_remap = name_to_index_training_input[source], name_to_index_training_input[remap]
-            statistics_remap[idx_remap] = (minimum[idx_src], maximum[idx_src], mean[idx_src], stdev[idx_src])
+            statistics_remap[idx_remap] = (minimum[idx_src], maximum[idx_src], mean[idx_src], stdev[idx_src], stdev_tend[idx_src])
 
         # Two-step to avoid overwriting the original statistics in the loop (this reduces dependence on order)
         for idx, new_stats in statistics_remap.items():
-            minimum[idx], maximum[idx], mean[idx], stdev[idx] = new_stats
+            minimum[idx], maximum[idx], mean[idx], stdev[idx], stdev_tend[idx] = new_stats
 
-        self._validate_normalization_inputs(name_to_index_training_input, minimum, maximum, mean, stdev)
+        self._validate_normalization_inputs(name_to_index_training_input, minimum, maximum, mean, stdev, stdev_tend)
 
         _norm_add = np.zeros((minimum.size,), dtype=np.float32)
         _norm_mul = np.ones((minimum.size,), dtype=np.float32)
@@ -94,11 +97,25 @@ class InputNormalizer(BasePreprocessor):
                 LOGGER.debug(f"Normalizing: {name} is max-normalised to [0, 1].")
                 _norm_mul[i] = 1 / maximum[i]
 
+            elif method == "residual":
+                LOGGER.debug(f"Normalizing: {name} is residual-normalised.")
+                if stdev[i] * stdev_tend[i] == 0:
+                    warnings.warn(f"Normalizing: the field {name} seems to be constant and can't be residual-normalised.")
+                _norm_mul[i] = 1 / stdev_tend[i]
+                _norm_add[i] = -mean[i] / stdev_tend[i]
+                
+                stdev_tend_geom += np.log(stdev_tend[i] / stdev[i])
+                residual_idx.append(i)
+
             elif method == "none":
                 LOGGER.info(f"Normalizing: {name} is not normalized.")
 
             else:
                 raise ValueError[f"Unknown normalisation method for {name}: {method}"]
+
+        stdev_tend_geom = np.exp(stdev_tend_geom / len(residual_idx)) if len(residual_idx) > 0 else 1.0
+        _norm_mul[residual_idx] *= stdev_tend_geom
+        _norm_add[residual_idx] *= stdev_tend_geom
 
         # register buffer - this will ensure they get copied to the correct device(s)
         self.register_buffer("_norm_mul", torch.from_numpy(_norm_mul), persistent=True)
@@ -106,7 +123,7 @@ class InputNormalizer(BasePreprocessor):
         self.register_buffer("_input_idx", data_indices.data.input.full, persistent=True)
         self.register_buffer("_output_idx", self.data_indices.data.output.full, persistent=True)
 
-    def _validate_normalization_inputs(self, name_to_index_training_input: dict, minimum, maximum, mean, stdev):
+    def _validate_normalization_inputs(self, name_to_index_training_input: dict, minimum, maximum, mean, stdev, stdev_tend):
         assert len(self.methods) == sum(len(v) for v in self.method_config.values()), (
             f"Error parsing methods in InputNormalizer methods ({len(self.methods)}) "
             f"and entries in config ({sum(len(v) for v in self.method_config)}) do not match."
@@ -117,6 +134,7 @@ class InputNormalizer(BasePreprocessor):
         assert maximum.size == n, (maximum.size, n)
         assert mean.size == n, (mean.size, n)
         assert stdev.size == n, (stdev.size, n)
+        assert stdev_tend.size == n, (stdev_tend.size, n)
 
         # Check for typos in method config
         assert isinstance(self.methods, dict)
@@ -128,6 +146,7 @@ class InputNormalizer(BasePreprocessor):
                 # "robust",
                 "min-max",
                 "max",
+                "residual",
                 "none",
             ], f"{method} is not a valid normalisation method"
 
