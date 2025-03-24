@@ -32,6 +32,7 @@ class BaseWeightedLoss(nn.Module, ABC):
         self,
         node_weights: torch.Tensor,
         ignore_nans: bool = False,
+        **_,
     ) -> None:
         """Node- and feature_weighted Loss.
 

@@ -125,8 +125,11 @@ class GraphForecaster(pl.LightningModule):
             limited_area_mask = torch.ones((1,))
 
         # Kwargs to pass to the loss function
-        loss_kwargs = {"node_weights": self.node_weights}
-
+        loss_kwargs = {
+            "node_weights": self.node_weights,
+            "nlat": torch.unique(self.latlons_data[:, 0]).shape[0],
+            "nlon": torch.unique(self.latlons_data[:, 1]).shape[0],
+        }
         # Scalars to include in the loss function, must be of form (dim, scalar)
         # Use -1 for the variable dimension, -2 for the latlon dimension
         # Add mask multiplying NaN locations with zero. At this stage at [[1]].

@@ -534,6 +534,20 @@ class LongRolloutPlots(BasePlotCallback):
             tag=f"gnn_pred_val_sample_rstep{rollout_step + 1:03d}_batch{batch_idx:04d}_rank0",
             exp_log_tag=f"val_pred_sample_rstep{rollout_step + 1:03d}_rank{pl_module.local_rank:01d}",
         )
+        fig = plot_power_spectrum(
+            plot_parameters_dict,
+            self.latlons,
+            data_0.squeeze(),
+            data_rollout_step.squeeze(),
+            output_tensor[0, 0, :, :],
+        )
+        self._output_figure(
+            logger,
+            fig,
+            epoch=epoch,
+            tag=f"gnn_pred_val_spec_rstep_{rollout_step + 1:03d}_batch{batch_idx:04d}_rank0",
+            exp_log_tag=f"val_pred_spec_rstep_{rollout_step + 1:03d}_rank{pl_module.local_rank:01d}",
+        )
 
     def _store_video_frame_data(
         self,
