@@ -373,20 +373,19 @@ class SpectralLoss(BaseWeightedLoss):
         
         return sp_loss    
     
-    def safe_cos(
+    def safe_coherence(
         self,
         coherence: torch.Tensor,
         amplitude: torch.Tensor,
     ) -> torch.Tensor:
         
-        cos = torch.where(
-            amplitude > 0,
-            coherence / amplitude,
-            0,
-        )
+        idx = amplitude > 0
 
-        return cos
+        amplitude[idx] = torch.sqrt(amplitude[idx])
+        coherence[idx] = coherence[idx] / amplitude[idx]
 
+        return coherence, amplitude
+    
     def spectral_loss_amse(
         self,
         pred: torch.Tensor,
@@ -400,8 +399,7 @@ class SpectralLoss(BaseWeightedLoss):
         coheren = coheren * self.m_weights
         coheren = self.sum_function(coheren, -1)
 
-        crossam = torch.sqrt(power_p * power_t)
-        coheren = self.safe_cos(coheren, crossam)
+        coheren, crossam = self.safe_coherence(coheren, power_p * power_t)
 
         sp_loss = (
             + (power_p + power_t - 2.0 * crossam)
