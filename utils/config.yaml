@@ -1,4 +1,6 @@
-# # # # # # # # # # # > > > DEFAULTS < < < # # # # # # # # # # #
+no_validation: True
+
+# # # # # # # # # # > > > DEFAULTS < < < # # # # # # # # # #
 defaults:
 - data: zarr
 - dataloader: native_grid
@@ -8,7 +10,7 @@ defaults:
 - model: transformer
 - training: default
 - _self_
-# # # # # # # # # # # < < < DEFAULTS > > > # # # # # # # # # # #
+# # # # # # # # # # < < < DEFAULTS > > > # # # # # # # # # #
 
 # # # # # # # # # # # > > > DATA < < < # # # # # # # # # # #
 data:
@@ -22,9 +24,9 @@ data:
   diagnostic: []
   normalizer:
     std: []
-    min-max: []
     max: []
-    residual: []
+    residual:
+    - tas
     none:
     - cos_julian_day
     - sin_julian_day
@@ -34,53 +36,34 @@ data:
     - sin_longitude
 # # # # # # # # # # # < < < DATA > > > # # # # # # # # # # #
 
-# # # # # # # # # # # > > > DATALOADER < < < # # # # # # # # # # #
+# # # # # # # # # # > > > DATALOADER < < < # # # # # # # # #
 dataloader:
   training:
     start: null
-    end: 1850-06-15
+    end: 1850-06-01
   validation:
-    start: 1850-06-16
-    end: 1850-06-25
+    start: 1850-07-01
+    end: 1850-09-01
   test:
     dataset: ${dataloader.dataset}
-    start: 1850-06-26
+    start: 1850-10-01
     end: null
-# # # # # # # # # # # < < < DATALOADER > > > # # # # # # # # # # #
+# # # # # # # # # # < < < DATALOADER > > > # # # # # # # # #
 
-# # # # # # # # # # # > > > DIAGNOSTICS < < < # # # # # # # # # # #
+# # # # # # # # # # > > > DIAGNOSTIC < < < # # # # # # # # #
 diagnostics:
   plot:
-    datashader: False
+    asynchronous: False
     parameters:
     - tas
     callbacks:
     - _target_: anemoi.training.diagnostics.callbacks.plot.GraphTrainableFeaturesPlot
-      every_n_epochs: 1
     - _target_: anemoi.training.diagnostics.callbacks.plot.PlotLoss
-      parameter_groups:
-        moisture: []
-        sfc_wind: []
+      parameter_groups: {}
     - _target_: anemoi.training.diagnostics.callbacks.plot.PlotSample
       sample_idx: ${diagnostics.plot.sample_idx}
-      per_sample : 6
       parameters: ${diagnostics.plot.parameters}
-      accumulation_levels_plot: [0, 0.05, 0.1, 0.25, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 7, 100]
-      cmap_accumulation:
-      - "#ffffff"
-      - "#04e9e7"
-      - "#019ff4"
-      - "#0300f4"
-      - "#02fd02"
-      - "#01c501"
-      - "#008e00"
-      - "#fdf802"
-      - "#e5bc00"
-      - "#fd9500"
-      - "#fd0000"
-      - "#d40000"
-      - "#bc0000"
-      - "#f800fd"
+      accumulation_levels_plot: []
       precip_and_related_fields: []
     - _target_: anemoi.training.diagnostics.callbacks.plot.PlotSpectrum
       sample_idx: ${diagnostics.plot.sample_idx}
@@ -89,9 +72,16 @@ diagnostics:
       sample_idx: ${diagnostics.plot.sample_idx}
       precip_and_related_fields: []
       parameters: ${diagnostics.plot.parameters}
-# # # # # # # # # # # < < < DIAGNOSTICS > > > # # # # # # # # # # #
+  log:
+    wandb:
+      entity: null
+    mlflow:
+      enabled: True
+      offline: True
+      tracking_uri: null
+# # # # # # # # # # < < < DIAGNOSTIC > > > # # # # # # # # #
 
-# # # # # # # # # # # > > > HARDWARE < < < # # # # # # # # # # #
+# # # # # # # # # # > > > HARDWARE < < < # # # # # # # # # #
 hardware:
   paths:
     data: source/
@@ -99,55 +89,54 @@ hardware:
   files:
     dataset: cesm-tas.zarr
     graph: cesm.pt
-# # # # # # # # # # # < < < HARDWARE > > > # # # # # # # # # # #
+# # # # # # # # # # < < < HARDWARE > > > # # # # # # # # # #
 
-# # # # # # # # # # # > > > GRAPH < < < # # # # # # # # # # #
+# # # # # # # # # # > > > GRAPHS < < < # # # # # # # # # # #
 graph:
-  overwrite: True
   nodes:
     hidden:
       node_builder:
+        _target_: anemoi.graphs.nodes.HEALPixNodes
         resolution: 2
-# # # # # # # # # # # < < < GRAPH > > > # # # # # # # # # # #
+  edges:
+  - source_name: ${graph.hidden}
+    target_name: ${graph.hidden}
+    edge_builders:
+    - _target_: anemoi.graphs.edges.KNNEdges
+      num_nearest_neighbours: 8
+    attributes: ${graph.attributes.edges}
+  - source_name: ${graph.hidden}
+    target_name: ${graph.data}
+    edge_builders:
+    - _target_: anemoi.graphs.edges.KNNEdges
+      num_nearest_neighbours: 3
+    attributes: ${graph.attributes.edges}
+# # # # # # # # # # < < < GRAPHS > > > # # # # # # # # # # #
 
-# # # # # # # # # # # > > > MODEL < < < # # # # # # # # # # #
+# # # # # # # # # # > > > MODELS < < < # # # # # # # # # # #
 model:
-  num_channels: 64
+  num_channels: 16
+  encoder:
+    _target_: anemoi.models.layers.mapper.SFNO2HEALPixForwardMapper
   processor:
     num_layers: 4
-    num_chunks: 2
-    mlp_hidden_ratio: 4
     num_heads: 4
-    window_size: 64
+    window_size: 32
     attention_implementation: scaled_dot_product_attention
-    softcap: 0.0
-    use_alibi_slopes: False
   trainable_parameters:
     data: 2
     hidden: 2
     data2hidden: 2
     hidden2data: 2
   bounding: []
-# # # # # # # # # # # < < < MODEL > > > # # # # # # # # # # #
+# # # # # # # # # # < < < MODELS > > > # # # # # # # # # # #
 
-# # # # # # # # # # # > > > TRAINING < < < # # # # # # # # # # #
+# # # # # # # # # # > > > TRAINING < < < # # # # # # # # # #
 training:
   training_loss:
-    _target_: anemoi.training.losses.combined.CombinedLoss
-    losses:
-    - _target_: anemoi.training.losses.mse.WeightedMSELoss
-    - _target_: anemoi.training.losses.spectral.SpectralLoss
-    loss_weights: [0.95, 0.05]
-    scalars: ['variable', 'loss_weights_mask']
-    ignore_nans: True
-    loss: power
-  rollout:
-    start: 1
-    epoch_increment: 0
-    max: 1
+    _target_: anemoi.training.losses.spectral.SpectralLoss
   variable_loss_scaling:
-    default: 1
     pl: {}
     sfc: {}
   metrics: []
-# # # # # # # # # # # < < < TRAINING > > > # # # # # # # # # # #
+# # # # # # # # # # < < < TRAINING > > > # # # # # # # # # #
