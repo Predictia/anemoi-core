@@ -81,6 +81,7 @@ class BasePlotCallback(Callback, ABC):
         self._executor = None
         self._error: BaseException = None
         self.datashader_plotting = config.diagnostics.plot.datashader
+        self.format = config.diagnostics.plot.get("format", "jpg")
 
         if self.config.diagnostics.plot.asynchronous:
             LOGGER.info("Setting up asynchronous plotting ...")
@@ -109,16 +110,22 @@ class BasePlotCallback(Callback, ABC):
             save_path = Path(
                 self.save_basedir,
                 "plots",
-                f"{tag}_epoch{epoch:03d}.jpg",
+                f"{tag}_epoch{epoch:03d}.{self.format}",
             )
 
             save_path.parent.mkdir(parents=True, exist_ok=True)
             fig.canvas.draw()
-            image_array = np.array(fig.canvas.renderer.buffer_rgba())
-            plt.imsave(save_path, image_array, dpi=100)
+
+            if self.format in ("pdf", "svg"):
+                plt.savefig(save_path)
+            elif self.format in ("png", "jpg"):
+                image_array = np.array(fig.canvas.renderer.buffer_rgba())
+                plt.imsave(save_path, image_array)
+            else:
+                raise NotImplementedError(f"Image format '{self.format}' not supported.")
+            
             if self.config.diagnostics.log.wandb.enabled:
                 import wandb
-
                 logger.experiment.log({exp_log_tag: wandb.Image(fig)})
             if self.config.diagnostics.log.mlflow.enabled:
                 run_id = logger.run_id
