@@ -115,6 +115,14 @@ class GraphForecaster(pl.LightningModule):
             "nlat": torch.unique(self.latlons_data[:, 0]).shape[0],
             "nlon": torch.unique(self.latlons_data[:, 1]).shape[0],
         }
+        # Loss delta: [y(t+1) - x(t)] vs. [x(t+1) - x(t)] instead of [y(t+1)] vs. [x(t+1)]
+        if config.training.get("loss_delta", False):
+            self.loss_diff = self.loss_delta
+            self.inverse_loss_diff = self.inverse_loss_delta
+        else:
+            self.loss_diff = lambda _, y: y
+            self.inverse_loss_diff = lambda _, y: y
+
         # Scalars to include in the loss function, must be of form (dim, scalar)
         # Use -1 for the variable dimension, -2 for the latlon dimension
         # Add mask multiplying NaN locations with zero. At this stage at [[1]].
@@ -461,8 +469,17 @@ class GraphForecaster(pl.LightningModule):
             y_pred = self(x)
 
             y = batch[:, self.multi_step + rollout_step, ..., self.data_indices.internal_data.output.full]
+
+            # loss delta: [y(t+1) - x(t)] vs. [x(t+1) - x(t)] instead of [y(t+1)] vs. [x(t+1)]
+            y_pred = self.loss_diff(x, y_pred)
+            y = self.loss_diff(x, y)
+            
             # y includes the auxiliary variables, so we must leave those out when computing the loss
             loss = checkpoint(self.loss, y_pred, y, use_reentrant=False) if training_mode else None
+
+            # undo loss delta - sum x(t) to y(t+1) and x(t+1)
+            y_pred = self.inverse_loss_diff(x, y_pred)
+            y = self.inverse_loss_diff(x, y)
 
             x = self.advance_input(x, y_pred, batch, rollout_step)
 
@@ -717,3 +734,39 @@ class GraphForecaster(pl.LightningModule):
             warmup_t=self.warmup_t,
         )
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+
+    def loss_delta(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+    ) -> torch.Tensor:
+
+        z = torch.empty_like(y)
+
+        z[..., self.data_indices.internal_model.output.prognostic] = (
+            + y[..., self.data_indices.internal_model.output.prognostic]
+            - x[:, -1, ..., self.data_indices.internal_model.input.prognostic]
+        )
+
+        z[..., self.data_indices.internal_model.output.diagnostic] = \
+            y[..., self.data_indices.internal_model.output.diagnostic]
+
+        return z
+    
+    def inverse_loss_delta(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+    ) -> torch.Tensor:
+        
+        z = torch.empty_like(y)
+
+        z[..., self.data_indices.internal_model.output.prognostic] = (
+            + y[..., self.data_indices.internal_model.output.prognostic]
+            + x[:, -1, ..., self.data_indices.internal_model.input.prognostic]
+        )
+
+        z[..., self.data_indices.internal_model.output.diagnostic] = \
+            y[..., self.data_indices.internal_model.output.diagnostic]
+
+        return z
