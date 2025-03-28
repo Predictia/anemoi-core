@@ -28,6 +28,7 @@ from matplotlib.colors import Normalize
 from matplotlib.colors import TwoSlopeNorm
 from pyshtools.expand import SHGLQ
 from pyshtools.expand import SHExpandGLQ
+from pyshtools.expand import SHExpandLSQ
 from scipy.interpolate import griddata
 
 from anemoi.training.diagnostics.maps import Coastlines
@@ -176,61 +177,56 @@ def plot_power_spectrum(
 
     pc_lat, pc_lon = equirectangular_projection(latlons)
 
-    pc_lon = np.array(pc_lon)
-    pc_lat = np.array(pc_lat)
     # Calculate delta_lat on the projected grid
-    delta_lat = abs(np.diff(pc_lat))
-    non_zero_delta_lat = delta_lat[delta_lat != 0]
-    min_delta_lat = np.min(abs(non_zero_delta_lat))
+    delta_lat = np.abs(np.diff(pc_lat))
+    min_delta_lat = np.min(delta_lat[delta_lat > 0])
 
     if min_delta_lat < min_delta:
         LOGGER.warning(
-            "Min. distance between lat/lon points is < specified minimum distance. Defaulting to min_delta=%s.",
+            "Min. distance between lat/lon points is < specified minimum distance. "
+            "Defaulting to min_delta=%s.",
             min_delta,
         )
         min_delta_lat = min_delta
 
-    # Define a regular grid for interpolation
-    n_pix_lat = int(np.floor(abs(pc_lat.max() - pc_lat.min()) / min_delta_lat))
-    n_pix_lon = (n_pix_lat - 1) * 2 + 1  # 2*lmax + 1
-    regular_pc_lon = np.linspace(pc_lon.min(), pc_lon.max(), n_pix_lon)
-    regular_pc_lat = np.linspace(pc_lat.min(), pc_lat.max(), n_pix_lat)
+    # Define a Gaussian grid for interpolation
+    n_pix_lat = int(np.floor(np.pi / min_delta_lat - 1))
+    n_pix_lon = 2 * n_pix_lat - 1  # 2 * lmax + 1 (lmax = n_pix_lat - 1)
+
+    regular_pc_lat = np.arccos(np.polynomial.legendre.leggauss(n_pix_lat)[0]) - np.pi / 2
+    regular_pc_lon = np.arange(n_pix_lon) * 2 * np.pi / n_pix_lon + np.min(pc_lon)
+    regular_pc_lon = np.mod(regular_pc_lon + np.pi, 2 * np.pi) - np.pi
+    
     grid_pc_lon, grid_pc_lat = np.meshgrid(regular_pc_lon, regular_pc_lat)
 
     for plot_idx, (variable_idx, (variable_name, output_only)) in enumerate(parameters.items()):
         yt = y_true[..., variable_idx].squeeze()
         yp = y_pred[..., variable_idx].squeeze()
 
-        # check for any nan in yt
-        nan_flag = np.isnan(yt).any()
+        xt = x[..., variable_idx].squeeze() if output_only else np.zeros_like(yt)
+        yt = yt - xt
+        yp = yp - xt
 
-        method = "linear" if nan_flag else "cubic"
-        if output_only:
-            xt = x[..., variable_idx].squeeze()
-            yt_i = griddata((pc_lon, pc_lat), (yt - xt), (grid_pc_lon, grid_pc_lat), method=method, fill_value=0.0)
-            yp_i = griddata((pc_lon, pc_lat), (yp - xt), (grid_pc_lon, grid_pc_lat), method=method, fill_value=0.0)
-        else:
-            yt_i = griddata((pc_lon, pc_lat), yt, (grid_pc_lon, grid_pc_lat), method=method, fill_value=0.0)
-            yp_i = griddata((pc_lon, pc_lat), yp, (grid_pc_lon, grid_pc_lat), method=method, fill_value=0.0)
+        method = "linear" if np.isnan(yt).any() else "cubic"
+        yt_i = griddata((pc_lon, pc_lat), yt, (grid_pc_lon, grid_pc_lat), method, 0.0)
+        yp_i = griddata((pc_lon, pc_lat), yp, (grid_pc_lon, grid_pc_lat), method, 0.0)
 
         # Masking NaN values
-        if nan_flag:
-            mask = np.isnan(yt_i)
-            if mask.any():
-                yt_i = np.where(mask, 0.0, yt_i)
-                yp_i = np.where(mask, 0.0, yp_i)
+        yt_i = np.where(~ np.isnan(yt_i), yt_i, 0.0)
+        yp_i = np.where(~ np.isnan(yp_i), yp_i, 0.0)
 
-        amplitude_t = np.array(compute_spectra(yt_i))
-        amplitude_p = np.array(compute_spectra(yp_i))
+        # Compute power spectra
+        amplitude_t = compute_spectra(yt_i)
+        amplitude_p = compute_spectra(yp_i)
 
         ax[plot_idx].loglog(
             np.arange(1, amplitude_t.shape[0]),
-            amplitude_t[1 : (amplitude_t.shape[0])],
+            amplitude_t[1:],
             label="Truth (data)",
         )
         ax[plot_idx].loglog(
             np.arange(1, amplitude_p.shape[0]),
-            amplitude_p[1 : (amplitude_p.shape[0])],
+            amplitude_p[1:],
             label="Predicted",
         )
 
@@ -240,6 +236,7 @@ def plot_power_spectrum(
         ax[plot_idx].set_xlabel("$k$")
         ax[plot_idx].set_ylabel("$P(k)$")
         ax[plot_idx].set_aspect("auto", adjustable=None)
+
     return fig
 
 
@@ -257,18 +254,60 @@ def compute_spectra(field: np.ndarray) -> np.ndarray:
         spectra of field by wavenumber
 
     """
-    field = np.array(field)
+    # Compute coefficients of real spherical harmonics.
+    # The first index is not the real/imaginary part of a complex number,
+    # but the sign (positive/negative) of the m order (these are real
+    # spherical harmonics, thus all coefficients are real).
+    lmax = field.shape[0] - 1
+    zero, weight = SHGLQ(lmax)
+    coeffs_field = SHExpandGLQ(field, w=weight, zero=zero)
 
-    # compute real and imaginary parts of power spectra of field
-    lmax = field.shape[0] - 1  # maximum degree of expansion
-    zero_w = SHGLQ(lmax)
-    coeffs_field = SHExpandGLQ(field, w=zero_w[1], zero=zero_w[0])
+    # Zonal power spectrum: S(m) = sum{l=m,...,L}[Y(l,m)^2 + Y(l,-m)^2]
+    # Notice that this is different from the usual definition (see SHTOOLS):
+    # S(l) = sum{m=0,...,l}[Y(l,m)^2 + Y(l,-m)^2]
+    power = (coeffs_field ** 2).sum(0).sum(0)
 
-    # Re**2 + Im**2
-    coeff_amp = coeffs_field[0, :, :] ** 2 + coeffs_field[1, :, :] ** 2
+    return power
 
-    # sum over meridional direction
-    return np.sum(coeff_amp, axis=0)
+
+def compute_spectra_lsq(
+    field: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+) -> np.ndarray:
+    """Compute spectral variability on any grid (by LSQ).
+
+    Parameters
+    ----------
+    field : np.ndarray
+        field to calculate the spectra of (any grid)
+    lat : np.ndarray
+        the latitudes of the field's grid
+    lon : np.ndarray
+        the longitudes of the field's grid
+
+    Returns
+    -------
+    np.ndarray
+        spectra of field by wavenumber
+
+    """
+    # Compute coefficients of real spherical harmonics.
+    # The first index is not the real/imaginary part of a complex number,
+    # but the sign (positive/negative) of the m order (these are real
+    # spherical harmonics, thus all coefficients are real).
+    lmax = np.floor(np.sqrt(len(field) / 2))
+    lmax = min(int(lmax), len(np.unique(lat))) - 1
+    lat = lat * 180 / np.pi
+    lon = lon * 180 / np.pi
+    coeffs_field, _ = SHExpandLSQ(field, lat, lon, lmax)
+
+    # Zonal power spectrum: S(m) = sum{l=m,...,L}[Y(l,m)^2 + Y(l,-m)^2]
+    # Notice that this is different from the usual definition (see SHTOOLS):
+    # S(l) = sum{m=0,...,l}[Y(l,m)^2 + Y(l,-m)^2]
+    power = (coeffs_field ** 2).sum(0).sum(0)
+
+    return power
 
 
 def plot_histogram(
