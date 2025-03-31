@@ -768,9 +768,10 @@ class SFNO2HEALPixForwardMapper(BaseMapper):
         norm_layer: str = "Identity",
         inner_skip: str | None = None,
         outer_skip: str | None = "Linear",
-        mix_first: bool = False,
+        mix_first: bool = True,
         mix_after: bool = True,
         filter_bias: bool = False,
+        fine_cutoff: float = 1.0,
         **_,
     ) -> None:
 
@@ -825,6 +826,7 @@ class SFNO2HEALPixForwardMapper(BaseMapper):
             mix_after=mix_after,
             filter_bias=filter_bias,
             trainable=trainable_size,
+            fine_cutoff=fine_cutoff,
         )
 
         # Save for later

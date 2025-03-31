@@ -168,6 +168,7 @@ class SpectralConvS2(Module):
         gain: float = 2.0,
         bias: bool = False,
         trainable: int = 0,
+        fine_cutoff: float = 1.0,
     ) -> None:
 
         super().__init__()
@@ -175,8 +176,8 @@ class SpectralConvS2(Module):
         self.forward_transform = forward_transform
         self.inverse_transform = inverse_transform
 
-        self.modes_lat = getattr(self.inverse_transform, "lmax")
-        self.modes_lon = getattr(self.inverse_transform, "mmax")
+        self.lmax = getattr(self.forward_transform, "lmax")
+        self.mmax = getattr(self.forward_transform, "mmax")
 
         # Inverse transform for residual (skip) connection
         forlat = getattr(self.forward_transform, "nlat")
@@ -190,8 +191,12 @@ class SpectralConvS2(Module):
             self.scale_residual = self.no_inverse_residual
 
         # Mimics Anemoi's trainable parameters
-        self.trainable = Parameter(torch.zeros(trainable, self.modes_lat, self.modes_lon, 2))
+        self.trainable = Parameter(torch.zeros(trainable, self.lmax, self.mmax, 2))
         in_channels = in_channels + trainable
+
+        # High frequencies cut
+        self.modes_lat = int(fine_cutoff * self.lmax)
+        self.modes_lon = int(fine_cutoff * self.mmax)
 
         # Define spectral filter operation
         self.einsum, shape = self.build_filter_operator(operator)
@@ -203,6 +208,12 @@ class SpectralConvS2(Module):
         weight = scale * weight
 
         self.weight = Parameter(weight)
+
+        # High frequencies pad
+        lat_cut = self.lmax - self.modes_lat
+        lon_cut = self.mmax - self.modes_lon
+
+        self.uncut = (0, lon_cut) * (len(shape) - 3) + (0, lat_cut)
 
         # Bias, if any
         if bias: self.bias = Parameter(torch.zeros(1, out_channels, 1))
@@ -254,6 +265,7 @@ class SpectralConvS2(Module):
 
         x = self.concat_trainable(x)
         w = torch.view_as_complex(self.weight)
+        w = torch.nn.functional.pad(w, self.uncut)
         x = torch.einsum(self.einsum, x, w)
 
         with torch.autocast(device, enabled=False):
@@ -281,10 +293,11 @@ class SFNO2HEALPixBlock(BaseBlock):
         norm_layer: Module = Identity,
         inner_skip: str | None = None,
         outer_skip: str | None = "linear",
-        mix_first: bool = False,
+        mix_first: bool = True,
         mix_after: bool = True,
         filter_bias: bool = False,
         trainable: int = 0,
+        fine_cutoff: float = 1.0,
     ) -> None:
         
         super().__init__()
@@ -313,6 +326,7 @@ class SFNO2HEALPixBlock(BaseBlock):
             gain=gain,
             bias=filter_bias,
             trainable=trainable,
+            fine_cutoff=fine_cutoff,
         )
 
         # Inner skip: x -> f(x) + x
