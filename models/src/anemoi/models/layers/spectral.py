@@ -316,8 +316,8 @@ class HEALPixInverseSHT(Module):
     def __init__(
         self,
         nside: int,
-        lmax: int = None,
-        mmax: int = None,
+        lmax: int | None = None,
+        mmax: int | None = None,
         folding: bool = False,
     ) -> None:
 
