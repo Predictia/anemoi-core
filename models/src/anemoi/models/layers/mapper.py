@@ -749,6 +749,7 @@ class SFNO2HEALPixForwardMapper(BaseMapper):
     def __init__(
         self,
         in_channels_src: int = 0,
+        in_channels_dst: int = 0,
         hidden_dim: int = 128,
         trainable_size: int = 0,
         cpu_offload: bool = False,
@@ -777,6 +778,7 @@ class SFNO2HEALPixForwardMapper(BaseMapper):
 
         super().__init__(
             in_channels_src=in_channels_src,
+            in_channels_dst=in_channels_dst,
             hidden_dim=hidden_dim,
             cpu_offload=cpu_offload,
             activation=activation,
@@ -787,6 +789,8 @@ class SFNO2HEALPixForwardMapper(BaseMapper):
 
         assert nlat * nlon == src_grid_size, "Only tensor-product grids are supported (feature graph)."
         assert nside.is_integer(), "Only HEALPix grids are supported (latent graph)."
+
+        assert hidden_dim > in_channels_dst, "No. channels > No. features (latent graph). "
 
         # Define shapes for nlat * nlon -> (nlat, nlon) reshaping
         if node_order == "lat-lon":
@@ -813,7 +817,7 @@ class SFNO2HEALPixForwardMapper(BaseMapper):
             forward_transform=fsht,
             inverse_transform=isht,
             input_dim=in_channels_src,
-            output_dim=hidden_dim,
+            output_dim=(hidden_dim - in_channels_dst),
             operator=operator,
             mlp_ratio=mlp_ratio,
             drop_rate=drop_rate,
@@ -898,9 +902,11 @@ class SFNO2HEALPixForwardMapper(BaseMapper):
         x_src, x_dst, _, _ = self.pre_process(x, shard_shapes, model_comm_group)
 
         x_src = self.reshape_sfno_in(x_src, batch_size)
-        x_dst = self.forward_sfno(x_src)
-        x_dst = self.reshape_sfno_out(x_dst)
-        
-        x_dst = self.post_process(x_dst, None, model_comm_group)
+        x_out = self.forward_sfno(x_src)
+        x_out = self.reshape_sfno_out(x_out)
 
-        return x[0], x_dst
+        x_out = torch.cat((x_out, x_dst), -1)
+        
+        x_out = self.post_process(x_out, None, model_comm_group)
+
+        return x[0], x_out
