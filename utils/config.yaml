@@ -17,45 +17,43 @@ data:
   frequency: 1d
   timestep: 1d
   forcing:
-  - cos_julian_day
-  - sin_julian_day
-  - cos_latitude
-  - sin_latitude
+  - tisr
+  - z
+  - lsm
   diagnostic: []
   normalizer:
     std: []
     max: []
     residual:
-    - tas
-    none:
-    - cos_julian_day
-    - sin_julian_day
-    - cos_latitude
-    - sin_latitude
-    - cos_longitude
-    - sin_longitude
+    - 100u
+    - 100v
+    - 2t
+    - msl
+    none: []
 # # # # # # # # # # # < < < DATA > > > # # # # # # # # # # #
 
 # # # # # # # # # # > > > DATALOADER < < < # # # # # # # # #
 dataloader:
   training:
-    start: null
-    end: 1850-06-01
+    start: 2000-01-01
+    end: 2000-01-31
   validation:
-    start: 1850-07-01
-    end: 1850-09-01
+    start: 2000-01-01
+    end: 2000-01-31
   test:
-    dataset: ${dataloader.dataset}
-    start: 1850-10-01
-    end: null
+    dataset: null
 # # # # # # # # # # < < < DATALOADER > > > # # # # # # # # #
 
 # # # # # # # # # # > > > DIAGNOSTIC < < < # # # # # # # # #
 diagnostics:
   plot:
     asynchronous: False
+    format: svg
     parameters:
-    - tas
+    - 100u
+    - 100v
+    - 2t
+    - msl
     callbacks:
     - _target_: anemoi.training.diagnostics.callbacks.plot.GraphTrainableFeaturesPlot
     - _target_: anemoi.training.diagnostics.callbacks.plot.PlotLoss
@@ -115,7 +113,7 @@ graph:
 
 # # # # # # # # # # > > > MODELS < < < # # # # # # # # # # #
 model:
-  num_channels: 16
+  num_channels: 32
   encoder:
     _target_: anemoi.models.layers.mapper.SFNO2HEALPixForwardMapper
   processor:
@@ -128,6 +126,15 @@ model:
     hidden: 2
     data2hidden: 2
     hidden2data: 2
+  normalization:
+    target: torch.nn.utils.spectral_norm
+    modules:
+      Linear:
+      - _target_: ${model.normalization.target}
+      Conv1d:
+      - _target_: ${model.normalization.target}
+      Conv2d:
+      - _target_: ${model.normalization.target}
   bounding: []
 # # # # # # # # # # < < < MODELS > > > # # # # # # # # # # #
 
