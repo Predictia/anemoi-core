@@ -10,6 +10,7 @@
 
 import logging
 from typing import Optional
+from functools import reduce
 
 import einops
 import torch
@@ -118,6 +119,75 @@ class AnemoiModelEncProcDec(nn.Module):
                 for cfg in getattr(model_config.model, "bounding", [])
             ]
         )
+
+        # Regularization (via weight normalization, w -> w / ||w||)
+        self._set_normalization(
+            normalization=getattr(model_config.model, "normalization", {})
+        )
+
+    def _set_normalization(self, normalization: dict) -> None:
+        """
+        Spectral normalization, following J. Schreck et al., Community Research Earth
+        Digital Intelligence Twin (2024). Bounds the `spectral norm` of the model, in
+        order to avoid explosive behaviour in autoregressive rollout (possibly caused
+        by `resonant` directions in the input space of one or more operators, which
+        are amplified in each forward pass). Impose [max{||Wx||/||x||} < 1] to avoid
+        any `resonant` directions. Notice that, (i) chaotic behaviour is usually
+        characterized by greater-than-one spectral norms (see Lyapunov exponents or
+        Lipschitz continuity for a better characterization), (ii) individually
+        bounding the spectral norm of the components of a model doesn't necessarily
+        bound the spectral norm of the full model. Moreover, this implementation
+        only works when using the (soon) deprecated `torch.nn.utils.spectral_norm`
+        (instead of the recommended `torch.nn.utils.parametrizations.spectral_norm`,
+        which uses torch's `parametrizations`, but only supports serialization with
+        the `state_dict`, and thus is incompatible with Anemoi's implementation of
+        the checkpointing callback) (early tests show that both functions produce
+        exactly the same results).
+
+        > model:
+        >   normalization:
+        >     modules:
+        >       Linear:
+        >       - _target_: torch.nn.utils.spectral_norm
+        """
+        # Freeze the model's state, because it may change
+        named_parameters = [n for n, p in self.named_parameters() if p.requires_grad]
+        modules = [m for m in self.modules()]
+
+        # Normalizations by parameter or by module
+        norm_by_params: dict = normalization.get("parameters", {})
+        norm_by_module: dict = normalization.get("modules", {})
+        
+        # Loop through all (parameter, normalizations) pairs
+        for name, norms in norm_by_params.items():
+            # Loop through all normalizations for the target parameter
+            for norm in norms:
+                # Loop through all parameters in the model
+                for n in named_parameters:
+                    # If the parameter's name matches the target's name
+                    if n.split(".")[-1] == name:
+                        # Get the parameter's parent module
+                        module = reduce(getattr, n.split(".")[:-1], self)
+                        # We assume the normalization is a callable (not a class)
+                        instantiate(norm, module=module, name=name)
+
+        # Loop through all (module, normalizations) pairs
+        for name, norms in norm_by_module.items():
+            # Loop through all normalizations for the target module
+            for norm in norms:
+                # Name of the target parameter (defaults to `weight`)
+                weight_name = norm.pop("weight_name", "weight")
+                # Loop through all modules in the model
+                for module in modules:
+                    # If the module's name matches the target's name
+                    if (
+                        any(c.__name__ == name for c in module.__class__.__mro__) and
+                        hasattr(module, weight_name) and
+                        getattr(module, weight_name).requires_grad
+                    ):
+                        # We assume the normalization is a callable (not a class)
+                        instantiate(norm, module=module, name=weight_name)
+        return
 
     def _calculate_shapes_and_indices(self, data_indices: dict) -> None:
         self.num_input_channels = len(data_indices.internal_model.input)
