@@ -331,7 +331,7 @@ class SFNO2HEALPixBlock(BaseBlock):
         
         # Mix channels before spectral filter
         if mix_first:
-            self.mix_first = ChannelSimpleMixer(input_dim, input_dim, 0.0, False)
+            self.mix_first = ChannelSimpleMixer(input_dim, input_dim, 1.0, False)
 
         # Define "gain" between layers
         gain = 1.0 if activation == Identity else 2.0
