@@ -21,7 +21,7 @@ from anemoi.datasets import open_dataset
 from scipy.spatial import ConvexHull
 from scipy.spatial import SphericalVoronoi
 from scipy.spatial import Voronoi
-from scipy.spatial import distance_matrix
+from scipy.spatial import KDTree
 from torch_geometric.data import HeteroData
 from torch_geometric.data.storage import NodeStorage
 
@@ -189,35 +189,60 @@ class SphericalAreaWeights(BaseNodeAttribute):
         radius: float = 1.0,
         centre: np.ndarray = np.array([0, 0, 0]),
         fill_value: float = 0.0,
+        threshold: float = 1e-3,
         dtype: str = "float32",
     ) -> None:
         super().__init__(norm, dtype)
         self.radius = radius
         self.centre = centre
         self.fill_value = fill_value
+        self.threshold = threshold * radius
 
     def get_raw_values(self, nodes: NodeStorage, **kwargs) -> np.ndarray:
         latitudes, longitudes = nodes.x[:, 0], nodes.x[:, 1]
         points = latlon_rad_to_cartesian((np.asarray(latitudes), np.asarray(longitudes)))
 
-        thresh = 1e-6 * self.radius
-        distan = distance_matrix(points, points)
-        unique = np.where(~ np.any(np.triu(distan < thresh, k=1), axis=0))[0]
+        # Group points (by proximity)
+        tree = KDTree(points)
 
+        indices = np.ones(len(points), dtype=bool)
+        leaders = np.zeros(len(points), dtype=int)
+
+        while indices.any():
+
+            p = points[n := np.argmax(indices)]
+
+            close = tree.query_ball_point(p, self.threshold)
+            close = [c for c in close if indices[c]]
+
+            leaders[close] = n
+            indices[close] = False
+        
+        unique, counts = np.unique(leaders, return_counts=True)
+        counts = dict(zip(unique, counts))
+        counts = np.array([counts[n] for n in leaders])
+
+        # Continue as usual with unique points
         sv = SphericalVoronoi(points[unique], self.radius, self.centre)
         area_weights_unique = sv.calculate_areas()
 
-        area_weights = np.zeros(points.shape[0])
+        # Unpack groups
+        area_weights = np.zeros(len(points), dtype=self.dtype)
+        
         area_weights[unique] = area_weights_unique
-        area_weights = area_weights[np.argmax(distan < thresh, axis=0)]
-
-        area_weights = area_weights / np.sum(distan < thresh, axis=0)
+        area_weights = area_weights[leaders]
+        area_weights = area_weights / counts
 
         LOGGER.debug(
-            "There are %d of weights, which (unscaled) add up a total weight of %.2f.",
-            len(area_weights),
-            np.array(area_weights).sum(),
+            (
+                "There are %d (unique) weights, %d (total) weights, "
+                "which (unscaled) add up to a total weight of %.2f."
+            ),
+            len(unique),
+            len(points),
+            area_weights.sum(),
         )
+
         return area_weights
 
 
