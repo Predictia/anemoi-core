@@ -49,6 +49,7 @@ diagnostics:
   plot:
     asynchronous: False
     format: svg
+    folder: True
     parameters:
     - 100u
     - 100v
@@ -142,6 +143,7 @@ model:
 training:
   training_loss:
     _target_: anemoi.training.losses.spectral.SpectralLoss
+    scalars: ['variable']
   variable_loss_scaling:
     pl: {}
     sfc: {}
