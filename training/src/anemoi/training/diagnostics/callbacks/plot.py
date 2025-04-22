@@ -15,6 +15,7 @@ import copy
 import logging
 import threading
 import time
+import re
 import traceback
 from abc import ABC
 from abc import abstractmethod
@@ -82,6 +83,7 @@ class BasePlotCallback(Callback, ABC):
         self._error: BaseException = None
         self.datashader_plotting = config.diagnostics.plot.datashader
         self.format = config.diagnostics.plot.get("format", "jpg")
+        self.folder = config.diagnostics.plot.get("folder", False)
 
         if self.config.diagnostics.plot.asynchronous:
             LOGGER.info("Setting up asynchronous plotting ...")
@@ -107,20 +109,20 @@ class BasePlotCallback(Callback, ABC):
     ) -> None:
         """Figure output: save to file and/or display in notebook."""
         if self.save_basedir is not None and fig is not None:
-            save_path = Path(
-                self.save_basedir,
-                "plots",
-                f"{tag}_epoch{epoch:03d}.{self.format}",
-            )
+            tags = re.split(r'_([a-zA-Z]+\d+)_?', tag) if self.folder else []
+            name = f"epoch{epoch:03d}" if self.folder else f"{tag}_epoch{epoch:03d}"
 
-            save_path.parent.mkdir(parents=True, exist_ok=True)
+            name = Path(*tags, f"{name}.{self.format}")
+            path = Path(self.save_basedir, "plots", name)
+
+            path.parent.mkdir(parents=True, exist_ok=True)
             fig.canvas.draw()
 
             if self.format in ("pdf", "svg"):
-                plt.savefig(save_path)
+                plt.savefig(path)
             elif self.format in ("png", "jpg"):
                 image_array = np.array(fig.canvas.renderer.buffer_rgba())
-                plt.imsave(save_path, image_array)
+                plt.imsave(path, image_array)
             else:
                 raise NotImplementedError(f"Image format '{self.format}' not supported.")
             
@@ -128,8 +130,11 @@ class BasePlotCallback(Callback, ABC):
                 import wandb
                 logger.experiment.log({exp_log_tag: wandb.Image(fig)})
             if self.config.diagnostics.log.mlflow.enabled:
-                run_id = logger.run_id
-                logger.experiment.log_artifact(run_id, str(save_path))
+                logger.experiment.log_artifact(
+                    run_id=logger.run_id,
+                    local_path=str(path),
+                    artifact_path=(str(name.parent) if self.folder else None),
+                )
 
         plt.close(fig)  # cleanup
 
@@ -1130,8 +1135,8 @@ class PlotSpectrum(BasePlotAdditionalMetrics):
                 logger,
                 fig,
                 epoch=epoch,
-                tag=f"gnn_pred_val_spec_rstep_{rollout_step:02d}_batch{batch_idx:04d}_rank0",
-                exp_log_tag=f"val_pred_spec_rstep_{rollout_step:02d}_rank{local_rank:01d}",
+                tag=f"gnn_pred_val_spec_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank0",
+                exp_log_tag=f"val_pred_spec_rstep{rollout_step:02d}_rank{local_rank:01d}",
             )
 
 
@@ -1213,6 +1218,6 @@ class PlotHistogram(BasePlotAdditionalMetrics):
                 logger,
                 fig,
                 epoch=epoch,
-                tag=f"gnn_pred_val_histo_rstep_{rollout_step:02d}_batch{batch_idx:04d}_rank0",
-                exp_log_tag=f"val_pred_histo_rstep_{rollout_step:02d}_rank{local_rank:01d}",
+                tag=f"gnn_pred_val_histo_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank0",
+                exp_log_tag=f"val_pred_histo_rstep{rollout_step:02d}_rank{local_rank:01d}",
             )
