@@ -86,8 +86,8 @@ hardware:
     data: source/
     output: output/
   files:
-    dataset: cesm-tas.zarr
-    graph: cesm.pt
+    dataset: era.zarr
+    graph: era.pt
 # # # # # # # # # # < < < HARDWARE > > > # # # # # # # # # #
 
 # # # # # # # # # # > > > GRAPHS < < < # # # # # # # # # # #
