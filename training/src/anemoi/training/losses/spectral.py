@@ -43,7 +43,7 @@ import logging
 import torch
 import numpy as np
 
-from anemoi.training.losses.weightedloss import BaseWeightedLoss
+from anemoi.training.losses.base import FunctionalLoss
 
 LOGGER = logging.getLogger(__name__)
 
@@ -226,31 +226,28 @@ class RealSHT(torch.nn.Module):
         return x
 
 
-class SpectralLoss(BaseWeightedLoss):
+class SpectralLoss(FunctionalLoss):
     """Spectral Loss (Spherical Harmonics)"""
 
     name = "spectral"
 
     def __init__(
         self,
-        node_weights: torch.Tensor,
         ignore_nans: bool = False,
         grid: str = "legendre-gauss",
         node_order: str = "lat-lon",
         nlat: int = 0,
         nlon: int = 0,
+        nnodes: int = 0,
         bias: float = 0.0,
         loss: str = "amse",
         root_fagg: bool = False,
         log_scale: bool = False,
     ) -> None:
         
-        super().__init__(
-            node_weights=node_weights,
-            ignore_nans=ignore_nans,
-        )
+        super().__init__(ignore_nans=ignore_nans)
 
-        assert nlat * nlon == len(node_weights), "Only tensor-product grids are supported."
+        assert nlat * nlon == nnodes, "Only tensor-product grids are supported."
 
         self.sht = RealSHT(nlat, nlon, grid)
 
@@ -411,13 +408,10 @@ class SpectralLoss(BaseWeightedLoss):
 
         return sp_loss
 
-    def forward(
+    def calculate_difference(
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
-        squash: bool = True,
-        scalar_indices: tuple[int, ...] | None = None,
-        without_scalars: list[str] | list[int] | None = None,
     ) -> torch.Tensor:
         """Calculates the spectral (spherical harmonics) loss.
 
@@ -427,21 +421,10 @@ class SpectralLoss(BaseWeightedLoss):
             Prediction tensor, shape (bs, ensemble, lat*lon, n_outputs)
         target : torch.Tensor
             Target tensor, shape (bs, ensemble, lat*lon, n_outputs)
-        squash : bool, optional
-            Average last dimension, by default True
-        scalar_indices: tuple[int,...], optional
-            Indices to subset the calculated scalar with, by default None
-        without_scalars: list[str] | list[int] | None, optional
-            list of scalars to exclude from scaling. Can be list of names or dimensions to exclude.
-            By default None
 
         Returns
         -------
         torch.Tensor
             Spectral loss
         """
-        loss = self.loss_function(pred, target)
-        loss = self.scale(loss, scalar_indices, without_scalars=without_scalars)
-        loss = self.avg_function(loss) if squash else self.avg_function(loss, (0, 1))
-
-        return loss
+        return self.loss_function(pred, target)[..., None, :]

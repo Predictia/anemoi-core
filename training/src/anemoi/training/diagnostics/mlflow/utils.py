@@ -15,6 +15,8 @@ from typing import Any
 
 import requests
 
+from anemoi.utils.remote import robust
+
 
 def health_check(tracking_uri: str) -> None:
     """Query the health endpoint of an MLflow server.
@@ -35,7 +37,11 @@ def health_check(tracking_uri: str) -> None:
     userpass = userpass.decode()
 
     headers = {"Authorization": f"Basic {userpass}"}
-    response = requests.get(f"{tracking_uri}/health", headers=headers, timeout=60)
+    response = robust(requests.get, retry_after=30, maximum_tries=10)(
+        f"{tracking_uri}/health",
+        headers=headers,
+        timeout=60,
+    )
 
     if response.text == "OK":
         return
@@ -120,3 +126,40 @@ def expand_iterables(
         else:
             expanded_params[key] = expand(value)
     return expanded_params
+
+
+def clean_config_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Clean up params to avoid issues with mlflow.
+
+    Too many logged params will make the server take longer to render the
+    experiment.
+
+    Parameters
+    ----------
+    params : dict[str, Any]
+        Parameters to clean up.
+
+    Returns
+    -------
+    dict[str, Any]
+        Cleaned up params ready for MlFlow.
+    """
+    prefixes_to_remove = [
+        "hardware",
+        "data",
+        "dataloader",
+        "model",
+        "training",
+        "diagnostics",
+        "graph",
+        "metadata.config",
+        "config.dataset.sourcesmetadata.dataset.variables_metadata",
+        "metadata.dataset.sources",
+        "metadata.dataset.specific",
+        "metadata.dataset.variables_metadata",
+    ]
+
+    keys_to_remove = [key for key in params if any(key.startswith(prefix) for prefix in prefixes_to_remove)]
+    for key in keys_to_remove:
+        del params[key]
+    return params

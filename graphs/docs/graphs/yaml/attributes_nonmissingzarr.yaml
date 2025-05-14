@@ -1,10 +1,10 @@
 nodes:
   data:
     node_builder:
-      _target_: anemoi.graphs.nodes.ZarrDatasetNodes
+      _target_: anemoi.graphs.nodes.AnemoiDatasetNodes
       # ...
     attributes:
       land_mask:
-        _target_: anemoi.graphs.nodes.attributes.NonmissingZarrVariable
+        _target_: anemoi.graphs.nodes.attributes.NonmissingAnemoiDatasetVariable
         variable: lsm
   hidden: ...
