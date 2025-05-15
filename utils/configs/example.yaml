@@ -1,10 +1,11 @@
-no_validation: True
+config_validation: False
 
 # # # # # # # # # # > > > DEFAULTS < < < # # # # # # # # # #
 defaults:
 - data: zarr
 - dataloader: native_grid
 - diagnostics: evaluation
+- datamodule: single
 - hardware: example
 - graph: multi_scale
 - model: transformer
@@ -99,12 +100,6 @@ graph:
         resolution: 2
   edges:
   - source_name: ${graph.hidden}
-    target_name: ${graph.hidden}
-    edge_builders:
-    - _target_: anemoi.graphs.edges.KNNEdges
-      num_nearest_neighbours: 8
-    attributes: ${graph.attributes.edges}
-  - source_name: ${graph.hidden}
     target_name: ${graph.data}
     edge_builders:
     - _target_: anemoi.graphs.edges.KNNEdges
@@ -143,9 +138,6 @@ model:
 training:
   training_loss:
     _target_: anemoi.training.losses.spectral.SpectralLoss
-    scalars: ['variable']
-  variable_loss_scaling:
-    pl: {}
-    sfc: {}
+    scalers: ['general_variable']
   metrics: []
 # # # # # # # # # # < < < TRAINING > > > # # # # # # # # # #
