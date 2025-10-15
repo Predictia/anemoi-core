@@ -127,6 +127,14 @@ class AnemoiModelEncProcDec(nn.Module):
             layer_kernels=self.layer_kernels_decoder,
         )
 
+        # Adversarial training x(t+1) = model(exciter(x(t))) + residual(x(t))
+        self.exciter = instantiate(
+            model_config.model.exciter,
+            lats=self._graph_data[self._graph_name_data].x[:, 0],
+            lons=self._graph_data[self._graph_name_data].x[:, 1],
+            vars_idx=data_indices.internal_model.input.prognostic,
+        )
+
         # Instantiation of model output bounding functions (e.g., to ensure outputs like TP are positive definite)
         self.boundings = nn.ModuleList(
             [
@@ -167,7 +175,7 @@ class AnemoiModelEncProcDec(nn.Module):
         # normalize and add data positional info (lat/lon)
         x_data_latent = torch.cat(
             (
-                einops.rearrange(x, "batch time ensemble grid vars -> (batch ensemble grid) (time vars)"),
+                einops.rearrange(self.exciter(x), "batch time ensemble grid vars -> (batch ensemble grid) (time vars)"),
                 self.node_attributes(self._graph_name_data, batch_size=batch_size),
             ),
             dim=-1,  # feature dimension
