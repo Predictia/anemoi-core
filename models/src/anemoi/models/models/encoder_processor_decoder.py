@@ -143,6 +143,12 @@ class AnemoiModelEncProcDec(nn.Module):
             layer_kernels=self.layer_kernels_decoder,
         )
 
+        # Residual (latent) connection z_proc = z + processor(z) or z_proc = processor(z)
+        self.latent_residual = getattr(model_config.model, "latent_residual", True)
+
+        # The model only returns the residual's output, ignoring the "delta" component
+        self.residual_only_mode = getattr(model_config.model, "residual_only_mode", False)
+
         # Residual connection x(t+1) = model(x(t)) + residual(x(t))
         self.residual = instantiate(
             model_config.model.residual,
@@ -303,6 +309,25 @@ class AnemoiModelEncProcDec(nn.Module):
             # bounding performed in the order specified in the config file
             x_out = bounding(x_out)
         return x_out
+    
+    def _residual_only_mode(self, x_skip, batch_size, ensemble_size):
+
+        graph_size = self._graph_data[self._graph_name_data].x.shape[0]
+        output_size = self.num_output_channels
+
+        zeroed_out = torch.zeros(
+            size=(batch_size * ensemble_size * graph_size, output_size),
+            dtype=x_skip.dtype,
+            device=x_skip.device,
+        )
+
+        return self._assemble_output(
+            x_out=zeroed_out,
+            x_skip=x_skip,
+            batch_size=batch_size,
+            ensemble_size=ensemble_size,
+            dtype=x_skip.dtype,
+        )
 
     def _calculate_input_dim(self, model_config):
         return self.multi_step * self.num_input_channels + self.node_attributes.attr_ndims[self._graph_name_data]
@@ -372,10 +397,12 @@ class AnemoiModelEncProcDec(nn.Module):
         )
 
     def forward(self, x: Tensor, *, model_comm_group: Optional[ProcessGroup] = None, **kwargs) -> Tensor:
-        batch_size = x.shape[0]
-        ensemble_size = x.shape[2]
 
+        batch_size, ensemble_size = x.shape[0], x.shape[2]
         x_data_latent, x_skip = self._assemble_input(x, batch_size)
+
+        if self.residual_only_mode: return self._residual_only_mode(x_skip, batch_size, ensemble_size)
+
         x_hidden_latent = self.node_attributes(self._graph_name_hidden, batch_size=batch_size)
 
         shard_shapes_data = get_shape_shards(x_data_latent, 0, model_comm_group)
@@ -396,7 +423,11 @@ class AnemoiModelEncProcDec(nn.Module):
             model_comm_group=model_comm_group,
         )
 
-        x_latent_proc = x_latent_proc + x_latent
+        x_latent_proc = (
+            x_latent_proc + x_latent
+            if self.latent_residual
+            else x_latent_proc
+        )
 
         x_out = self._run_mapper(
             self.decoder,
