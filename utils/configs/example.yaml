@@ -5,8 +5,7 @@ defaults:
 - data: zarr
 - dataloader: native_grid
 - diagnostics: evaluation
-- datamodule: single
-- hardware: example
+- system: example
 - graph: multi_scale
 - model: transformer
 - training: default
@@ -21,16 +20,30 @@ data:
   - tisr
   - z
   - lsm
-  diagnostic: []
+  diagnostic:
+  - 100u
+  - 100v
   normalizer:
     std: []
     max: []
+    none: []
     residual:
+    - 2t
+    - msl
+  imputer:
+    0.0:
     - 100u
     - 100v
     - 2t
     - msl
-    none: []
+    - tisr
+    - z
+    - lsm
+  processors:
+    imputer:
+      _target_: anemoi.models.preprocessing.imputer.ConstantImputer
+      _convert_: all
+      config: ${data.imputer}
 # # # # # # # # # # # < < < DATA > > > # # # # # # # # # # #
 
 # # # # # # # # # # > > > DATALOADER < < < # # # # # # # # #
@@ -82,13 +95,13 @@ diagnostics:
 # # # # # # # # # # < < < DIAGNOSTIC > > > # # # # # # # # #
 
 # # # # # # # # # # > > > HARDWARE < < < # # # # # # # # # #
-hardware:
-  paths:
-    data: source/
-    output: output/
-  files:
-    dataset: era.zarr
-    graph: era.pt
+system:
+  input:
+    root: source/
+    dataset: ${system.input.root}/era.zarr
+    graph: cesm.pt
+  output:
+    root: output/
 # # # # # # # # # # < < < HARDWARE > > > # # # # # # # # # #
 
 # # # # # # # # # # > > > GRAPHS < < < # # # # # # # # # # #
@@ -109,19 +122,32 @@ graph:
 
 # # # # # # # # # # > > > MODELS < < < # # # # # # # # # # #
 model:
+  residual_only_mode: False
   num_channels: 32
-  encoder:
-    _target_: anemoi.models.layers.mapper.SFNO2HEALPixForwardMapper
   processor:
     num_layers: 4
     num_heads: 4
     window_size: 32
     attention_implementation: scaled_dot_product_attention
+  encoder:
+    _target_: anemoi.models.layers.mapper.SFNO2HEALPixForwardMapper
+  decoder:
+    graph_attention_backend: pyg
   trainable_parameters:
     data: 2
     hidden: 2
     data2hidden: 2
     hidden2data: 2
+  residual:
+    _target_: anemoi.models.layers.residual.CompleteOrnsteinResidual
+    grid: legendre-gauss
+    lmax: 8
+    regressors:
+    - tisr
+    skip_blur:
+    - 2t
+  exciter:
+    _target_: anemoi.models.layers.adversarial.SpottyRandomNoise
   normalization:
     target: torch.nn.utils.spectral_norm
     modules:
@@ -138,6 +164,7 @@ model:
 training:
   training_loss:
     _target_: anemoi.training.losses.spectral.SpectralLoss
-    scalers: ['general_variable']
+    scalers:
+    - general_variable
   metrics: []
 # # # # # # # # # # < < < TRAINING > > > # # # # # # # # # #

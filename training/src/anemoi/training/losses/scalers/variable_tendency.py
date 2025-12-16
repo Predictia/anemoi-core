@@ -7,21 +7,16 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-from __future__ import annotations
 
 import logging
 import warnings
 from abc import abstractmethod
-from typing import TYPE_CHECKING
 
-import numpy as np
+import torch
 
+from anemoi.models.data_indices.collection import IndexCollection
 from anemoi.training.losses.scalers.base_scaler import BaseScaler
 from anemoi.training.utils.enums import TensorDim
-
-if TYPE_CHECKING:
-
-    from anemoi.models.data_indices.collection import IndexCollection
 
 LOGGER = logging.getLogger(__name__)
 
@@ -64,13 +59,12 @@ class BaseTendencyScaler(BaseScaler):
     @abstractmethod
     def get_level_scaling(self, variable_level: int) -> float: ...
 
-    def get_scaling_values(self, **_kwargs) -> np.ndarray:
-        variable_level_scaling = np.ones((len(self.data_indices.internal_data.output.full),), dtype=np.float32)
+    def get_scaling_values(self, **_kwargs) -> torch.Tensor:
+        variable_level_scaling = torch.ones((len(self.data_indices.data.output.full),), dtype=torch.float32)
 
-        for key, idx in self.data_indices.internal_model.output.name_to_index.items():
-            if (
-                idx in self.data_indices.internal_model.output.prognostic
-                and self.data_indices.data.output.name_to_index.get(key)
+        for key, idx in self.data_indices.model.output.name_to_index.items():
+            if idx in self.data_indices.model.output.prognostic and self.data_indices.data.output.name_to_index.get(
+                key,
             ):
                 prog_idx = self.data_indices.data.output.name_to_index[key]
                 variable_stdev = self.statistics["stdev"][prog_idx] if self.statistics_tendencies else 1

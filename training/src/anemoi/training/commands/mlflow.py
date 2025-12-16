@@ -8,8 +8,6 @@
 # nor does it submit to any jurisdiction.
 
 
-from __future__ import annotations
-
 import argparse
 import getpass
 import json
@@ -34,9 +32,23 @@ class MlFlow(Command):
             help=help_msg,
             description=help_msg,
         )
-        login.add_argument(
+        login_group = login.add_mutually_exclusive_group()
+        login_group.add_argument(
             "--url",
+            "-u",
             help="The URL of the authentication server. If not provided, the last used URL will be tried.",
+        )
+        login_group.add_argument(
+            "--all",
+            "-a",
+            action="store_true",
+            help="Log in to all known servers.",
+        )
+        login_group.add_argument(
+            "--list",
+            "-l",
+            action="store_true",
+            help="List all known servers.",
         )
         login.add_argument(
             "--force-credentials",
@@ -135,25 +147,48 @@ class MlFlow(Command):
         )
 
     @staticmethod
-    def run(args: argparse.Namespace) -> None:
+    def run(args: argparse.Namespace) -> None:  # noqa: C901
         if args.subcommand == "login":
-            from anemoi.training.diagnostics.mlflow.auth import TokenAuth
+            from datetime import datetime
+            from datetime import timezone
 
-            url = args.url or TokenAuth.load_config().get("url")
+            from anemoi.utils.mlflow.auth import TokenAuth
 
-            if not url:
+            if args.list:
+                servers = TokenAuth.get_servers()
+                if not servers:
+                    LOGGER.error("No known servers. Rerun the login command with --url")
+                    return
+                LOGGER.info("Known servers:")
+                for url, refresh_expires in servers:
+                    expires = datetime.fromtimestamp(refresh_expires, tz=timezone.utc)
+                    if expires < datetime.now(tz=timezone.utc):
+                        LOGGER.info(" - %s (expired, login required)", url)
+                        continue
+                    LOGGER.info(" - %s (expires: %s UTC)", url, expires.strftime("%Y-%m-%d %H:%M:%S"))
+                return
+
+            if args.url:
+                urls = [args.url]  # specific url
+            else:
+                urls = [url for url, _ in TokenAuth.get_servers()]  # all urls
+                if not args.all and len(urls) > 0:
+                    urls = [urls[0]]  # last used url
+
+            if not urls:
                 msg = "No URL provided and no past URL found. Rerun the command with --url"
                 raise ValueError(msg)
 
-            TokenAuth(url=url).login(force_credentials=args.force_credentials)
+            for url in urls:
+                TokenAuth(url=url).login(force_credentials=args.force_credentials)
             return
 
         if args.subcommand == "sync":
-            from anemoi.training.diagnostics.mlflow.utils import health_check
             from anemoi.training.utils.mlflow_sync import MlFlowSync
+            from anemoi.utils.mlflow.utils import health_check
 
             if args.authentication:
-                from anemoi.training.diagnostics.mlflow.auth import TokenAuth
+                from anemoi.utils.mlflow.auth import TokenAuth
 
                 auth = TokenAuth(url=args.destination)
                 auth.login()
@@ -178,8 +213,8 @@ class MlFlow(Command):
             from hydra import compose
             from hydra import initialize
 
-            from anemoi.training.diagnostics.mlflow.client import AnemoiMlflowClient
             from anemoi.training.diagnostics.mlflow.logger import AnemoiMLflowLogger
+            from anemoi.utils.mlflow.client import AnemoiMlflowClient
 
             # Load configuration and resolve schema
             with initialize(version_base=None, config_path="./"):

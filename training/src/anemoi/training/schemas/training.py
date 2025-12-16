@@ -7,22 +7,22 @@
 # nor does it submit to any jurisdiction.
 
 
-from __future__ import annotations
-
 from enum import Enum
 from functools import partial
 from typing import Annotated
 from typing import Any
 from typing import Literal
-from typing import Union
 
 from pydantic import AfterValidator
+from pydantic import BaseModel as PydanticBaseModel
+from pydantic import Discriminator
 from pydantic import Field
 from pydantic import NonNegativeFloat
 from pydantic import NonNegativeInt
 from pydantic import PositiveInt
 from pydantic import field_validator
 from pydantic import model_validator
+from typing_extensions import Self
 
 from anemoi.utils.schemas import BaseModel
 from anemoi.utils.schemas.errors import allowed_values
@@ -79,13 +79,11 @@ class LR(BaseModel):
     "Number of warm up iteration. Default to 1000."
 
 
-class OptimizerSchema(BaseModel):
-    """Optimizer configuration."""
+class OptimizerSchema(PydanticBaseModel):
+    """Choosing the PydanticBaseModel to allow extra inputs."""
 
-    zero: bool = Field(example=False)
-    "Use Zero optimiser."
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-    "Additional arguments to pass to the optimizer."
+    target_: str = Field(..., alias="_target_")
+    """Full path to the optimizer class, e.g. `torch.optim.AdamW`."""
 
 
 class ExplicitTimes(BaseModel):
@@ -127,8 +125,18 @@ class GeneralVariableLossScalerSchema(BaseModel):
     "Weight of each variable."  # Check keys (variables) are read ???
 
 
+class VariableMaskingScalerSchema(BaseModel):
+    target_: Literal["anemoi.training.losses.scalers.VariableMaskingLossScaler"] = Field(..., alias="_target_")
+    variables: list[str] = Field(defaultexample=["tp"])
+    "Variables to compute the loss over."
+    invert: bool = Field(examples=False)
+    "Flag to invert the variable mask."
+
+
 class NaNMaskScalerSchema(BaseModel):
     target_: Literal["anemoi.training.losses.scalers.NaNMaskScaler"] = Field(..., alias="_target_")
+    use_processors_tendencies: bool = Field(default=False)
+    "Flag to include processors for tendencies when building the loss mask."
 
 
 class TendencyScalerTargets(str, Enum):
@@ -169,7 +177,7 @@ class GraphNodeAttributeScalerSchema(BaseModel):
     "Name of the nodes to take the attribute from."
     nodes_attribute_name: str = Field(example="area_weight")
     "Name of the node attribute to return."
-    norm: Union[Literal["unit-max", "unit-sum"], None] = Field(example="unit-sum")
+    norm: Literal["unit-max", "unit-sum"] | None = Field(example="unit-sum")
     "Normalisation method applied to the node attribute."
 
 
@@ -187,18 +195,19 @@ class ReweightedGraphNodeAttributeScalerSchema(BaseModel):
     weight_frac_of_total: float = Field(example=0.5)
     "Fraction of total weight to assign to nodes within the scaling mask. The remaining weight is distributed among "
     "nodes outside the mask."
-    norm: Union[Literal["unit-max", "unit-sum"], None] = Field(example="unit-sum")
+    norm: Literal["unit-max", "unit-sum"] | None = Field(example="unit-sum")
     "Normalisation method applied to the node attribute."
 
 
-ScalerSchema = Union[
-    GeneralVariableLossScalerSchema,
-    VariableLevelScalerSchema,
-    TendencyScalerSchema,
-    NaNMaskScalerSchema,
-    GraphNodeAttributeScalerSchema,
-    ReweightedGraphNodeAttributeScalerSchema,
-]
+ScalerSchema = (
+    GeneralVariableLossScalerSchema
+    | VariableLevelScalerSchema
+    | VariableMaskingScalerSchema
+    | TendencyScalerSchema
+    | NaNMaskScalerSchema
+    | GraphNodeAttributeScalerSchema
+    | ReweightedGraphNodeAttributeScalerSchema
+)
 
 
 class ImplementedLossesUsingBaseLossSchema(str, Enum):
@@ -206,6 +215,7 @@ class ImplementedLossesUsingBaseLossSchema(str, Enum):
     afkcrps = "anemoi.training.losses.kcrps.AlmostFairKernelCRPS"
     rmse = "anemoi.training.losses.RMSELoss"
     mse = "anemoi.training.losses.MSELoss"
+    weighted_mse = "anemoi.training.losses.WeightedMSELoss"
     mae = "anemoi.training.losses.MAELoss"
     logcosh = "anemoi.training.losses.LogCoshLoss"
     huber = "anemoi.training.losses.HuberLoss"
@@ -242,7 +252,7 @@ class CombinedLossSchema(BaseLossSchema):
     target_: Literal["anemoi.training.losses.combined.CombinedLoss"] = Field(..., alias="_target_")
     losses: list[BaseLossSchema] = Field(min_length=1)
     "Losses to combine, can be any of the normal losses."
-    loss_weights: Union[list[Union[int, float]], None] = None
+    loss_weights: list[int | float] | None = None
     "Weightings of losses, if not set, all losses are weighted equally."
 
     @field_validator("losses", mode="before")
@@ -258,7 +268,7 @@ class CombinedLossSchema(BaseLossSchema):
         return losses
 
     @model_validator(mode="after")
-    def check_length_of_weights_and_losses(self) -> CombinedLossSchema:
+    def check_length_of_weights_and_losses(self) -> Self:
         """Check that the number of losses and weights match, or if not set, skip."""
         losses, loss_weights = self.losses, self.loss_weights
         if loss_weights is not None and len(losses) != len(loss_weights):
@@ -267,7 +277,7 @@ class CombinedLossSchema(BaseLossSchema):
         return self
 
 
-LossSchemas = Union[BaseLossSchema, HuberLossSchema, CombinedLossSchema]
+LossSchemas = BaseLossSchema | HuberLossSchema | CombinedLossSchema | AlmostFairKernelCRPSSchema | KernelCRPSSchema
 
 
 class ImplementedStrategiesUsingBaseDDPStrategySchema(str, Enum):
@@ -292,15 +302,15 @@ class DDPEnsGroupStrategyStrategySchema(BaseDDPStrategySchema):
     "Number of GPUs per ensemble."
 
 
-StrategySchemas = Union[BaseDDPStrategySchema, DDPEnsGroupStrategyStrategySchema]
+StrategySchemas = BaseDDPStrategySchema | DDPEnsGroupStrategyStrategySchema
 
 
 class BaseTrainingSchema(BaseModel):
     """Training configuration."""
 
-    run_id: Union[str, None] = Field(example=None)
+    run_id: str | None = Field(example=None)
     "Run ID: used to resume a run from a checkpoint, either last.ckpt or specified in hardware.files.warm_start."
-    fork_run_id: Union[str, None] = Field(example=None)
+    fork_run_id: str | None = Field(example=None)
     "Run ID to fork from, either last.ckpt or specified in hardware.files.warm_start."
     load_weights_only: bool = Field(example=False)
     "Load only the weights from the checkpoint, not the optimiser state."
@@ -334,11 +344,9 @@ class BaseTrainingSchema(BaseModel):
     "Scalers to use in the computation of the loss and validation scores."
     validation_metrics: dict[str, LossSchemas]
     "List of validation metrics configurations."
-    variable_groups: dict[str, Union[str, list[str]]]
+    variable_groups: dict[str, str | list[str] | dict[str, str | bool | list[str | int]]]
     "Groups for variable loss scaling"
-    rollout: Rollout = Field(default_factory=Rollout)
-    "Rollout configuration."
-    max_epochs: Union[PositiveInt, None] = None
+    max_epochs: PositiveInt | None = None
     "Maximum number of epochs, stops earlier if max_steps is reached first."
     max_steps: PositiveInt = 150000
     "Maximum number of steps, stops earlier if max_epochs is reached first."
@@ -346,24 +354,41 @@ class BaseTrainingSchema(BaseModel):
     "Learning rate configuration."
     optimizer: OptimizerSchema = Field(default_factory=OptimizerSchema)
     "Optimizer configuration."
+    recompile_limit: PositiveInt = 32
+    "How many times torch.compile will recompile a function for a given input shape."
     metrics: list[str]
     "List of metrics"
+    ensemble_size_per_device: PositiveInt = 1
+    "Number of ensemble members per device. Default is 1 for non-ensemble forecasting."
 
 
 class ForecasterSchema(BaseTrainingSchema):
-    model_task: Literal["anemoi.training.train.forecaster.GraphForecaster",] = Field(..., alias="model_task")
+    model_task: Literal["anemoi.training.train.tasks.GraphForecaster",] = Field(..., alias="model_task")
+    "Training objective."
+    rollout: Rollout = Field(default_factory=Rollout)
+    "Rollout configuration."
+
+
+class ForecasterEnsSchema(ForecasterSchema):
+    model_task: Literal["anemoi.training.train.tasks.GraphEnsForecaster",] = Field(..., alias="model_task")
     "Training objective."
 
 
-class ForecasterEnsSchema(BaseTrainingSchema):
-    model_task: Literal["anemoi.training.train.forecaster.GraphEnsForecaster",] = Field(..., alias="model_task")
+class DiffusionForecasterSchema(ForecasterSchema):
+    model_task: Literal["anemoi.training.train.tasks.GraphDiffusionForecaster"] = Field(..., alias="model_task")
     "Training objective."
-    ensemble_size_per_device: PositiveInt = Field(example=1)
-    "Number of ensemble member per device"
+
+
+class DiffusionTendForecasterSchema(ForecasterSchema):
+    model_task: Literal["anemoi.training.train.tasks.GraphDiffusionTendForecaster"] = Field(
+        ...,
+        alias="model_task",
+    )
+    "Training objective."
 
 
 class InterpolationSchema(BaseTrainingSchema):
-    model_task: Literal["anemoi.training.train.forecaster.GraphInterpolator"] = Field(..., alias="model_task")
+    model_task: Literal["anemoi.training.train.tasks.GraphInterpolator"] = Field(..., alias="model_task")
     "Training objective."
     explicit_times: ExplicitTimes
     "Time indices for input and output."
@@ -371,4 +396,11 @@ class InterpolationSchema(BaseTrainingSchema):
     "Forcing parameters for target output times."
 
 
-TrainingSchema = Union[ForecasterSchema, ForecasterEnsSchema, InterpolationSchema]
+TrainingSchema = Annotated[
+    ForecasterSchema
+    | ForecasterEnsSchema
+    | InterpolationSchema
+    | DiffusionForecasterSchema
+    | DiffusionTendForecasterSchema,
+    Discriminator("model_task"),
+]

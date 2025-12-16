@@ -8,7 +8,7 @@ Anemoi-training exposes a couple of loss functions by default to be
 used, all of which are subclassed from ``BaseLoss``. This class enables
 scaler multiplication, and graph node weighting.
 
-.. automodule:: anemoi.training.losses.weightedloss
+.. automodule:: anemoi.training.losses.base
    :members:
    :no-undoc-members:
    :show-inheritance:
@@ -17,20 +17,28 @@ scaler multiplication, and graph node weighting.
  Deterministic Loss Functions
 ******************************
 
-By default anemoi-training trains the model using a latitude-weighted
-mean-squared-error, which is defined in the ``WeightedMSELoss`` class in
+By default anemoi-training trains the model using a mean-squared-error,
+which is defined in the ``MSELoss`` class in
 ``anemoi/training/losses/mse.py``. The loss function can be configured
 in the config file at ``config.training.training_loss``, and
 ``config.training.validation_metrics``.
 
 The following loss functions are available by default:
 
--  ``WeightedMSELoss``: Latitude-weighted mean-squared-error.
--  ``WeightedMAELoss``: Latitude-weighted mean-absolute-error.
--  ``WeightedHuberLoss``: Latitude-weighted Huber loss.
--  ``WeightedLogCoshLoss``: Latitude-weighted log-cosh loss.
--  ``WeightedRMSELoss``: Latitude-weighted root-mean-squared-error.
+-  ``MSELoss``: mean-squared-error.
+-  ``RMSELoss``: root mean-squared-error.
+-  ``MAELoss``: mean-absolute-error.
+-  ``HuberLoss``: Huber loss.
+-  ``LogCoshLoss``: log-cosh loss.
 -  ``CombinedLoss``: Combined component weighted loss.
+
+All the above losses by default are averaged across the grid nodes,
+ensemble dimension and batch size. Losses can also consider specific
+weighting either spatial, vertical or specific to the variables used.
+Those weights are defined via `scalers`. For example spatial scaling
+based on the area of the nodes needs is done using the ``node_weights``
+as a scaler. For more details on the loss function scaling please refer
+to :ref:`loss-function-scaling`.
 
 These are available in the ``anemoi.training.losses`` module, at
 ``anemoi.training.losses.{short_name}.{class_name}``.
@@ -55,6 +63,8 @@ The following probabilistic loss functions are available by default:
 -  ``KernelCRPSLoss``: Kernel CRPS loss.
 -  ``AlmostFairKernelCRPSLoss``: Almost fair Kernel CRPS loss see `Lang
    et al. (2024) <http://arxiv.org/abs/2412.15832>`_.
+-  ``WeightedMSELoss`` : is the MSELoss used for the diffussion model to
+   handle noise weights
 
 The config for these loss functions is the same as for the
 deterministic:
@@ -66,6 +76,27 @@ deterministic:
       # loss class to initialise
       _target_: anemoi.training.losses.kcrps.KernelCRPSLoss
       # loss function kwargs here
+
+************************
+ Spatial Loss Functions
+************************
+
+The following spatial loss functions are available (**to be used only
+with regular 2D fields, i.e. fields that can be written as [`n_lat`,
+`n_lon`]**):
+
+-  ``LogFFT2Distance``: log spectral distance from the 2D fast Fourier
+   transform.
+
+-  ``FourierCorrelationLoss``: Fourier correlation loss, also computed
+   from the 2D fast Fourier transform see `Yan et al. (2024)
+   <https://arxiv.org/pdf/2410.23159.pdf>`_.
+
+Both of these loss functions are defined in the
+``anemoi.training.losses.spatial`` module, and can be configured in the
+config file at ``config.training.training_loss`` in the same way as the
+deterministic loss functions with additional kwargs `x_dim` and `y_dim`
+specifying the field shape of the input tensors.
 
 *********
  Scalers
@@ -152,11 +183,112 @@ level scalers.
 If working with upper-air variables from variable levels, the
 temperature fields start with the variable reference `t` followed by the
 level, i.e. `t_500`, `t_850`, etc. Since `t` is specified under variable
-group `pl`, all temperature fields are considered group `pl`. If the
-datasets are build from mars the variable reference is etracted from
-metadata, otherwise by splitting the variable name by `_` and taking the
-first part, see class
+group `pl`, all temperature fields are considered group `pl`.
+
+If the datasets are built from mars the variable reference is extracted
+from metadata, otherwise it is found by splitting the variable name by
+`_` and taking the first part, see class
 `anemoi.training.utils.ExtractVariableGroupAndLevel`.
+
+If more complex variable groups are required, it is possible to define
+the group values as a dictionary, such that the variable's metadata must
+contain the key and value pair. See
+`anemoi.transforms.variable.Variable` for the metadata attributes that
+are available.
+
+.. code:: yaml
+
+   variable_groups:
+     default: sfc
+     pl:
+        is_pressure_level: True
+     z_ml:
+        is_model_level: True
+        param: 'z'
+
+The list of available metadata attributes is:
+
+-  ``is_pressure_level``: whether the variable is a pressure level,
+-  ``is_model_level``: whether the variable is a model level,
+-  ``is_surface_level``: whether the variable is on the surface,
+-  ``level``: the level of the variable,
+-  ``is_constant_in_time``: whether the variable is constant in time,
+-  ``is_instantanous``: whether the variable is instantaneous,
+-  ``is_valid_over_a_period``: whether the variable is valid over a
+   period,
+-  ``time_processing``: the time processing type of the variable,
+-  ``period``: the variable's period as a timedelta,
+-  ``is_accumulation``: whether the variable is an accumulation,
+-  ``param``: the parameter name of the variable,
+-  ``grib_keys``: the GRIB keys for the variable,
+-  ``is_computed_forcing``: whether if the variable is a computed
+   forcing,
+-  ``is_from_input``: whether the variable is from input.
+
+For example, to set a different scaler coefficient for a particular
+level, several groups can be defined:
+
+.. code:: yaml
+
+   variable_groups:
+     default: sfc
+     pl:
+        is_pressure_level: True
+     l_50:  # this needs to come first to take priority
+        param: ["z"]
+        level: [50]
+     l:
+        param: ["z"]
+
+If metadata is not available, complex variable groups cannot be defined,
+and an error will be raised.
+
+If multiple groups are defined for a variable, the first group in the
+`variable_groups` is used. If the variable is not in any group, it is
+assigned to the default group.
+
+Custom Scalars
+==============
+
+To create a custom scalar, subclass the ``BaseScaler`` and implement the
+``get_scaling_values`` method. This method should return an array of the
+scaling values. Set ``scale_dims`` to the dimensions that the scaling
+values should be applied to.
+
+.. code:: python
+
+   from anemoi.training.losses.scalers import BaseScaler
+   from anemoi.training.utils.enums import TensorDim
+
+   class CustomScaler(BaseScaler):
+      scale_dims = [TensorDim.GRID]
+      def get_scaling_values(self):
+         # Custom scaling logic here
+         return scaling_values
+
+This scalar will only be instantiated once at the start of training, and
+thus cannot adapt throughout batches and epochs.
+
+Custom Updating Scalars
+-----------------------
+
+If you want a scalar that adapts throughout the training process, you
+can subclass the ``BaseUpdatingScaler``.
+
+As with the ``BaseScaler``, set the initial scalar values at the start
+of training by implementing the ``get_scaling_values`` method.
+Currently, two callbacks to update at are available, at the start of
+training, and at the start of every batch.
+
+Implementing any of these updating methods will allow for the scaler
+values to be changed at the specified point. If ``None`` is returned by
+these methods, it indicates that the scaler values should not be updated
+at that time.
+
+An example of this updating scaler is the
+``anemoi.training.losses.scalers.loss_weights_mask.NaNMaskScaler``,
+which updates the loss weights based on the presence of NaN values in
+the input.
 
 ********************
  Validation Metrics
@@ -186,7 +318,7 @@ By default, only `all` is kept in the normalised space and scaled.
    # List of validation metrics to keep in normalised space, and scalers to be applied
    # Use '*' in reference all metrics, or a list of metric names.
    # Unlike above, variable scaling is possible due to these metrics being
-   # calculated in the same way as the training loss, within the internal model space.
+   # calculated in the same way as the training loss, within the model space.
    scale_validation_metrics:
    scalers_to_apply: ['variable']
    metrics:

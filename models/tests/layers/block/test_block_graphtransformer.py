@@ -13,7 +13,6 @@ import importlib
 import pytest
 import torch
 import torch.nn as nn
-from hydra.utils import instantiate
 
 import anemoi.models.layers.block
 from anemoi.models.layers.block import GraphTransformerMapperBlock
@@ -23,17 +22,16 @@ from anemoi.models.layers.utils import load_layer_kernels
 
 
 @pytest.fixture
-def init():
+def init_proc():
     in_channels = 128
     hidden_dim = 64
     out_channels = 128
     edge_dim = 11
     bias = True
-    activation = "GELU"
     num_heads = 8
-    num_chunks = 2
-    layer_kernels = instantiate(load_layer_kernels(kernel_config={}))
+    layer_kernels = load_layer_kernels()
     qk_norm = True
+    graph_attention_backend = "pyg"
     return (
         in_channels,
         hidden_dim,
@@ -41,15 +39,14 @@ def init():
         edge_dim,
         layer_kernels,
         bias,
-        activation,
         num_heads,
-        num_chunks,
         qk_norm,
+        graph_attention_backend,
     )
 
 
 @pytest.fixture
-def block(init):
+def block(init_proc):
     (
         in_channels,
         hidden_dim,
@@ -57,11 +54,10 @@ def block(init):
         edge_dim,
         layer_kernels,
         bias,
-        activation,
         num_heads,
-        num_chunks,
         qk_norm,
-    ) = init
+        graph_attention_backend,
+    ) = init_proc
     return GraphTransformerProcessorBlock(
         in_channels=in_channels,
         hidden_dim=hidden_dim,
@@ -70,14 +66,13 @@ def block(init):
         layer_kernels=layer_kernels,
         num_heads=num_heads,
         bias=bias,
-        activation=activation,
         update_src_nodes=False,
-        num_chunks=num_chunks,
         qk_norm=qk_norm,
+        graph_attention_backend=graph_attention_backend,
     )
 
 
-def test_GraphTransformerProcessorBlock_init(init, block):
+def test_GraphTransformerProcessorBlock_init(init_proc, block):
     (
         _in_channels,
         _hidden_dim,
@@ -85,11 +80,10 @@ def test_GraphTransformerProcessorBlock_init(init, block):
         _edge_dim,
         _layer_kernels,
         _bias,
-        _activation,
         num_heads,
-        num_chunks,
         _qk_norm,
-    ) = init
+        _backend,
+    ) = init_proc
     assert isinstance(
         block, GraphTransformerProcessorBlock
     ), "block is not an instance of GraphTransformerProcessorBlock"
@@ -97,7 +91,6 @@ def test_GraphTransformerProcessorBlock_init(init, block):
         block.out_channels_conv == out_channels // num_heads
     ), f"block.out_channels_conv ({block.out_channels_conv}) != out_channels // num_heads ({out_channels // num_heads})"
     assert block.num_heads == num_heads, f"block.num_heads ({block.num_heads}) != num_heads ({num_heads})"
-    assert block.num_chunks == num_chunks, f"block.num_chunks ({block.num_chunks}) != num_chunks ({num_chunks})"
     assert isinstance(block.lin_key, torch.nn.Linear), "block.lin_key is not an instance of torch.nn.Linear"
     assert isinstance(block.lin_query, torch.nn.Linear), "block.lin_query is not an instance of torch.nn.Linear"
     assert isinstance(block.lin_value, torch.nn.Linear), "block.lin_value is not an instance of torch.nn.Linear"
@@ -112,7 +105,7 @@ def test_GraphTransformerProcessorBlock_init(init, block):
     assert block.k_norm.bias is None
 
 
-def test_GraphTransformerProcessorBlock_shard_qkve_heads(init, block):
+def test_GraphTransformerProcessorBlock_shard_qkve_heads(init_proc, block):
     (
         in_channels,
         _hidden_dim,
@@ -120,11 +113,10 @@ def test_GraphTransformerProcessorBlock_shard_qkve_heads(init, block):
         _edge_dim,
         _layer_kernels,
         _bias,
-        _activation,
         num_heads,
-        _num_chunks,
         _qk_norm,
-    ) = init
+        _backend,
+    ) = init_proc
     query = torch.randn(in_channels, num_heads * block.out_channels_conv)
     key = torch.randn(in_channels, num_heads * block.out_channels_conv)
     value = torch.randn(in_channels, num_heads * block.out_channels_conv)
@@ -138,7 +130,7 @@ def test_GraphTransformerProcessorBlock_shard_qkve_heads(init, block):
     assert edges.shape == (in_channels, num_heads, block.out_channels_conv)
 
 
-def test_GraphTransformerProcessorBlock_shard_output_seq(init, block):
+def test_GraphTransformerProcessorBlock_shard_output_seq(init_proc, block):
     (
         in_channels,
         _hidden_dim,
@@ -146,11 +138,10 @@ def test_GraphTransformerProcessorBlock_shard_output_seq(init, block):
         _edge_dim,
         _layer_kernels,
         _bias,
-        _activation,
         num_heads,
-        _num_chunks,
         _qk_norm,
-    ) = init
+        _backend,
+    ) = init_proc
     out = torch.randn(in_channels, num_heads, block.out_channels_conv)
     shapes = (10, 10, 10)
     batch_size = 1
@@ -159,7 +150,7 @@ def test_GraphTransformerProcessorBlock_shard_output_seq(init, block):
 
 
 @pytest.mark.gpu
-def test_GraphTransformerProcessorBlock_forward_backward(init, block):
+def test_GraphTransformerProcessorBlock_forward_backward(init_proc, block):
     (
         in_channels,
         _hidden_dim,
@@ -167,11 +158,10 @@ def test_GraphTransformerProcessorBlock_forward_backward(init, block):
         edge_dim,
         _layer_kernels,
         _bias,
-        _activation,
         _num_heads,
-        _num_chunks,
         _qk_norm,
-    ) = init
+        _backend,
+    ) = init_proc
 
     # Generate random input tensor
     x = torch.randn((10, in_channels))
@@ -206,7 +196,7 @@ def test_GraphTransformerProcessorBlock_forward_backward(init, block):
 
 
 @pytest.fixture
-def test_GraphTransformerProcessorBlock_chunking(init, block, monkeypatch):
+def test_GraphTransformerProcessorBlock_chunking(init_proc, block, monkeypatch):
     (
         in_channels,
         _hidden_dim,
@@ -216,7 +206,8 @@ def test_GraphTransformerProcessorBlock_chunking(init, block, monkeypatch):
         _activation,
         _num_heads,
         _num_chunks,
-    ) = init
+        _backend,
+    ) = init_proc
     # Initialize GraphTransformerProcessorBlock
     block = block
 
@@ -246,7 +237,31 @@ def test_GraphTransformerProcessorBlock_chunking(init, block, monkeypatch):
 
 
 @pytest.fixture
-def mapper_block(init):
+def init_mapper():
+    in_channels = 128
+    hidden_dim = 64
+    out_channels = 128
+    edge_dim = 11
+    bias = True
+    num_heads = 8
+    layer_kernels = load_layer_kernels()
+    qk_norm = True
+    graph_attention_backend = "pyg"
+    return (
+        in_channels,
+        hidden_dim,
+        out_channels,
+        edge_dim,
+        layer_kernels,
+        bias,
+        num_heads,
+        qk_norm,
+        graph_attention_backend,
+    )
+
+
+@pytest.fixture
+def mapper_block(init_mapper):
     (
         in_channels,
         hidden_dim,
@@ -254,11 +269,10 @@ def mapper_block(init):
         edge_dim,
         layer_kernels,
         bias,
-        activation,
         num_heads,
-        num_chunks,
         qk_norm,
-    ) = init
+        graph_attention_backend,
+    ) = init_mapper
     return GraphTransformerMapperBlock(
         in_channels=in_channels,
         hidden_dim=hidden_dim,
@@ -267,14 +281,13 @@ def mapper_block(init):
         layer_kernels=layer_kernels,
         num_heads=num_heads,
         bias=bias,
-        activation=activation,
         update_src_nodes=False,
-        num_chunks=num_chunks,
         qk_norm=qk_norm,
+        graph_attention_backend=graph_attention_backend,
     )
 
 
-def test_GraphTransformerMapperBlock_init(init, mapper_block):
+def test_GraphTransformerMapperBlock_init(init_mapper, mapper_block):
     (
         _in_channels,
         _hidden_dim,
@@ -282,18 +295,16 @@ def test_GraphTransformerMapperBlock_init(init, mapper_block):
         _edge_dim,
         _layer_kernels,
         _bias,
-        _activation,
         num_heads,
-        num_chunks,
         _qk_norm,
-    ) = init
+        _backend,
+    ) = init_mapper
     block = mapper_block
     assert isinstance(block, GraphTransformerMapperBlock), "block is not an instance of GraphTransformerMapperBlock"
     assert (
         block.out_channels_conv == out_channels // num_heads
     ), f"block.out_channels_conv ({block.out_channels_conv}) != out_channels // num_heads ({out_channels // num_heads})"
     assert block.num_heads == num_heads, f"block.num_heads ({block.num_heads}) != num_heads ({num_heads})"
-    assert block.num_chunks == num_chunks, f"block.num_chunks ({block.num_chunks}) != num_chunks ({num_chunks})"
     assert isinstance(block.lin_key, torch.nn.Linear), "block.lin_key is not an instance of torch.nn.Linear"
     assert isinstance(block.lin_query, torch.nn.Linear), "block.lin_query is not an instance of torch.nn.Linear"
     assert isinstance(block.lin_value, torch.nn.Linear), "block.lin_value is not an instance of torch.nn.Linear"
@@ -306,7 +317,7 @@ def test_GraphTransformerMapperBlock_init(init, mapper_block):
     ), "block.node_dst_mlp is not an instance of torch.nn.Sequential"
 
 
-def test_GraphTransformerMapperBlock_shard_qkve_heads(init, mapper_block):
+def test_GraphTransformerMapperBlock_shard_qkve_heads(init_mapper, mapper_block):
     (
         in_channels,
         _hidden_dim,
@@ -314,11 +325,10 @@ def test_GraphTransformerMapperBlock_shard_qkve_heads(init, mapper_block):
         _edge_dim,
         _layer_kernels,
         _bias,
-        _activation,
         num_heads,
-        _num_chunks,
         _qk_norm,
-    ) = init
+        _backend,
+    ) = init_mapper
     block = mapper_block
     query = torch.randn(in_channels, num_heads * block.out_channels_conv)
     key = torch.randn(in_channels, num_heads * block.out_channels_conv)
@@ -333,19 +343,10 @@ def test_GraphTransformerMapperBlock_shard_qkve_heads(init, mapper_block):
     assert edges.shape == (in_channels, num_heads, block.out_channels_conv)
 
 
-def test_GraphTransformerMapperBlock_shard_output_seq(init, mapper_block):
-    (
-        in_channels,
-        _hidden_dim,
-        _out_channels,
-        _edge_dim,
-        _layer_kernels,
-        _bias,
-        _activation,
-        num_heads,
-        _num_chunks,
-        _qk_norm,
-    ) = init
+def test_GraphTransformerMapperBlock_shard_output_seq(init_mapper, mapper_block):
+    (in_channels, _hidden_dim, _out_channels, _edge_dim, _layer_kernels, _bias, num_heads, _qk_norm, _backend) = (
+        init_mapper
+    )
     block = mapper_block
     out = torch.randn(in_channels, num_heads, block.out_channels_conv)
     shapes = (10, 10, 10)
@@ -354,7 +355,7 @@ def test_GraphTransformerMapperBlock_shard_output_seq(init, mapper_block):
     assert out.shape == (in_channels, num_heads * block.out_channels_conv)
 
 
-def test_GraphTransformerMapperBlock_forward_backward(init, mapper_block):
+def test_GraphTransformerMapperBlock_forward_backward(init_mapper, mapper_block):
     (
         in_channels,
         _hidden_dim,
@@ -362,11 +363,10 @@ def test_GraphTransformerMapperBlock_forward_backward(init, mapper_block):
         edge_dim,
         _layer_kernels,
         _bias,
-        _activation,
         _num_heads,
-        _num_chunks,
         _qk_norm,
-    ) = init
+        _backend,
+    ) = init_mapper
     # Initialize GraphTransformerMapperBlock
     block = mapper_block
 
@@ -401,46 +401,3 @@ def test_GraphTransformerMapperBlock_forward_backward(init, mapper_block):
         assert (
             param.grad.shape == param.shape
         ), f"param.grad.shape ({param.grad.shape}) != param.shape ({param.shape}) for {param}"
-
-
-def test_GraphTransformerMapperBlock_chunking(init, mapper_block, monkeypatch):
-    (
-        in_channels,
-        _hidden_dim,
-        _out_channels,
-        edge_dim,
-        _layer_kernels,
-        _bias,
-        _activation,
-        _num_heads,
-        _num_chunks,
-        _qk_norm,
-    ) = init
-    # Initialize GraphTransformerMapperBlock
-    block = mapper_block
-
-    # Generate random input tensor
-    x = (torch.randn((10, in_channels)), torch.randn((10, in_channels)))
-    edge_attr = torch.randn((10, edge_dim))
-    edge_index = torch.randint(1, 10, (2, 10))
-    shapes = (10, 10, 10)
-    batch_size = 1
-    size = (10, 10)
-    num_chunks = torch.randint(2, 10, (1,)).item()
-
-    # manually set to non-training mode
-    block.eval()
-
-    # result with chunks
-    monkeypatch.setenv("ANEMOI_INFERENCE_NUM_CHUNKS", str(num_chunks))
-    importlib.reload(anemoi.models.layers.block)
-    out_chunked, _ = block(x, edge_attr, edge_index, shapes, batch_size, size=size)
-    # result without chunks, reload block for new env variable
-    monkeypatch.setenv("ANEMOI_INFERENCE_NUM_CHUNKS", "1")
-    importlib.reload(anemoi.models.layers.block)
-    out, _ = block(x, edge_attr, edge_index, shapes, batch_size, size=size)
-
-    assert out[0].shape == out_chunked[0].shape, f"out.shape ({out.shape}) != out_chunked.shape ({out_chunked.shape})"
-    assert out[1].shape == out_chunked[1].shape, f"out.shape ({out.shape}) != out_chunked.shape ({out_chunked.shape})"
-    assert torch.allclose(out[0], out_chunked[0], atol=1e-4), "out != out_chunked"
-    assert torch.allclose(out[1], out_chunked[1], atol=1e-4), "out != out_chunked"

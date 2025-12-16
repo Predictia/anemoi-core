@@ -7,13 +7,16 @@
 # nor does it submit to any jurisdiction.
 #
 
+from typing import Any
 from typing import Literal
 
 from pydantic import Field
 from pydantic import NonNegativeFloat
 from pydantic import NonNegativeInt
+from pydantic import model_validator
 
 from .common_components import GNNModelComponent
+from .common_components import PointWiseModelComponent
 from .common_components import TransformerModelComponent
 
 
@@ -40,6 +43,21 @@ class GraphTransformerProcessorSchema(TransformerModelComponent):
     qk_norm: bool = Field(example=False)
     "Normalize the query and key vectors. Default to False."
 
+    @model_validator(mode="after")
+    def check_valid_extras(self) -> Any:
+        # This is a check to allow backwards compatibilty of the configs, as the extra fields are not required.
+        allowed_extras = {"graph_attention_backend": str}
+        extras = getattr(self, "__pydantic_extra__", {}) or {}
+        for extra_field, value in extras.items():
+            if extra_field not in allowed_extras:
+                msg = f"Extra field '{extra_field}' is not allowed. Allowed fields are: {list(allowed_extras.keys())}."
+                raise ValueError(msg)
+            if not isinstance(value, allowed_extras[extra_field]):
+                msg = f"Extra field '{extra_field}' must be of type {allowed_extras[extra_field].__name__}."
+                raise TypeError(msg)
+
+        return self
+
 
 class TransformerProcessorSchema(TransformerModelComponent):
     target_: Literal["anemoi.models.layers.processor.TransformerProcessor"] = Field(..., alias="_target_")
@@ -60,3 +78,30 @@ class TransformerProcessorSchema(TransformerModelComponent):
     "Softcap value for attention. Default to 0.0."
     use_alibi_slopes: bool = Field(example=False)
     "Use alibi slopes for attention implementation. Default to False."
+
+    @model_validator(mode="after")
+    def check_valid_extras(self) -> Any:
+        # Check for valid extra fields related to MultiHeadSelfAttention and MultiHeadCrossAttention
+        # This is a check to allow backwards compatibilty of the configs, as the extra fields are not required.
+        allowed_extras = {"use_rotary_embeddings": bool}
+        extras = getattr(self, "__pydantic_extra__", {}) or {}
+        for extra_field, value in extras.items():
+            if extra_field not in allowed_extras:
+                msg = f"Extra field '{extra_field}' is not allowed. Allowed fields are: {list(allowed_extras.keys())}."
+                raise ValueError(msg)
+            if not isinstance(value, allowed_extras[extra_field]):
+                msg = f"Extra field '{extra_field}' must be of type {allowed_extras[extra_field].__name__}."
+                raise TypeError(msg)
+
+        return self
+
+
+class PointWiseMLPProcessorSchema(PointWiseModelComponent):
+    target_: Literal["anemoi.models.layers.processor.PointWiseMLPProcessor"] = Field(..., alias="_target_")
+    "Transformer processor object from anemoi.models.layers.processor."
+    num_layers: NonNegativeInt = Field(example=16)
+    "Number of layers of Transformer processor."
+    num_channels: NonNegativeInt = Field(example=128)
+    "Number of channels."
+    dropout_p: NonNegativeFloat = Field(example=0.1)
+    "Dropout probability, default 0.0"

@@ -8,8 +8,6 @@
 # nor does it submit to any jurisdiction.
 
 
-from __future__ import annotations
-
 import logging
 
 import numpy as np
@@ -23,6 +21,38 @@ from pytorch_lightning.trainer.states import TrainerFn
 from anemoi.training.utils.seeding import get_base_seed
 
 LOGGER = logging.getLogger(__name__)
+
+
+def register_gradient_scaling_hooks(
+    model: torch.nn.Module,
+    model_comm_group_size: float,
+    skip_grad_scaling: list[str] | None = None,
+) -> None:
+    """Register parameter hooks for gradient reduction.
+
+    Here, we rescale parameters that only see a subset of the input on each rank
+    -> these are still divided by the total number of GPUs in DDP as if each rank would see a full set of inputs
+    note: the trainable parameters are added before the split across GPUs and are therefore not rescaled.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The model to register hooks on.
+    model_comm_group_size : float
+        The size of the model communication group for scaling.
+    skip_grad_scaling : list[str] | None
+        List of parameter name patterns to skip gradient scaling.
+        Defaults to ["trainable", "no_gradscaling"].
+    """
+    if skip_grad_scaling is None:
+        skip_grad_scaling = ["trainable", "no_gradscaling"]
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(skip_name in name for skip_name in skip_grad_scaling):
+            continue
+        param.register_hook(lambda grad: grad * float(model_comm_group_size))
 
 
 def seed_rnd(model_comm_group_id: int, global_rank: int) -> None:
@@ -258,15 +288,8 @@ class DDPGroupStrategy(DDPStrategy):
         return dataloader
 
     def register_parameter_hooks(self) -> None:
-        """Register parameter hooks for gradient reduction.
-
-        Here, we rescale parameters that only see a subset of the input on each rank
-        -> these are still divided by the total number of GPUs in DDP as if each rank would see a full set of inputs
-        note: the trainable parameters are added before the split across GPUs and are therefore not rescaled.
-        """
-        for name, param in self.model.named_parameters():
-            if param.requires_grad is True and "trainable" not in name:
-                param.register_hook(lambda grad: grad * float(self.model_comm_group_size))
+        """Register parameter hooks for gradient reduction."""
+        register_gradient_scaling_hooks(self.model, self.model_comm_group_size)
 
 
 class DDPEnsGroupStrategy(DDPStrategy):
@@ -401,15 +424,42 @@ class DDPEnsGroupStrategy(DDPStrategy):
             self.ens_comm_group_size,
         )
 
+        # ens_comm_subgroup: subgroup of same model_comm_group ranks inside the ensemble group
+        spacing = self.model_comm_group_size
+        ens_comm_subgroup_ranks = [
+            ens_comm_group[offset::spacing] for ens_comm_group in ens_comm_group_ranks for offset in range(spacing)
+        ]
+
+        ens_comm_subgroups = [torch.distributed.new_group(x) for x in ens_comm_subgroup_ranks]
+
+        ens_comm_subgroup_size = self.ens_comm_group_size // self.model_comm_group_size
+        ens_comm_subgroup_id = ens_comm_group_id * self.model_comm_group_size + model_comm_group_rank
+        ens_comm_subgroup_rank = ens_comm_group_rank // self.model_comm_group_size
+        ens_comm_num_subgroups = self.world_size // ens_comm_subgroup_size
+
+        ens_comm_subgroup = ens_comm_subgroups[ens_comm_subgroup_id]
+        self.model.set_ens_comm_subgroup(
+            ens_comm_subgroup,
+            ens_comm_subgroup_id,
+            ens_comm_subgroup_rank,
+            ens_comm_num_subgroups,
+            ens_comm_subgroup_size,
+        )
+
         LOGGER.info(
             "Rank %d ens_comm_group_id: %d ens_comm_group: %s ens_comm_group_rank: %d "
-            "ens_comm_group_size: %d ens_comm_group.size(): %d",
+            "ens_comm_group_size: %d ens_comm_group.size(): %d ens_comm_subgroup_id: %d "
+            "ens_comm_subgroup: %s ens_comm_subgroup_rank: %d ens_comm_subgroup.size(): %d ",
             self.global_rank,
             ens_comm_group_id,
             str(ens_comm_group_ranks[ens_comm_group_id]),
             ens_comm_group_rank,
             self.ens_comm_group_size,
             ens_comm_group.size(),
+            ens_comm_subgroup_id,
+            str(ens_comm_subgroup_ranks[ens_comm_subgroup_id]),
+            ens_comm_subgroup_rank,
+            ens_comm_subgroup_size,
         )
 
         # register hooks for correct gradient reduction
@@ -485,22 +535,18 @@ class DDPEnsGroupStrategy(DDPStrategy):
             model_comm_group_id,
             model_comm_group_rank,
             model_comm_num_groups,
+            reader_group_rank,
+            self.read_group_size,
+        )
+
+        dataloader.dataset.set_ens_comm_group_info(
             ens_comm_group_id,
             ens_comm_group_rank,
             ens_comm_num_groups,
-            reader_group_rank,
-            self.read_group_size,
         )
 
         return dataloader
 
     def register_parameter_hooks(self) -> None:
-        """Register parameter hooks for gradient reduction.
-
-        Here, we rescale parameters that only see a subset of the input on each rank
-        -> these are still divided by the total number of GPUs in DDP as if each rank would see a full set of inputs
-        note: the trainable parameters are added before the split across GPUs and are therefore not rescaled.
-        """
-        for name, param in self.model.named_parameters():
-            if param.requires_grad is True and "trainable" not in name:
-                param.register_hook(lambda grad: grad * float(self.model_comm_group_size))
+        """Register parameter hooks for gradient reduction."""
+        register_gradient_scaling_hooks(self.model, self.model_comm_group_size)

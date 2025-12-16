@@ -8,8 +8,6 @@
 # nor does it submit to any jurisdiction.
 
 
-from __future__ import annotations
-
 import asyncio
 import copy
 import logging
@@ -23,16 +21,20 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import matplotlib.animation as animation
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
+import pytorch_lightning as pl
 import torch
+from matplotlib.colors import Colormap
+from omegaconf import OmegaConf
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.utilities import rank_zero_only
 
+from anemoi.models.layers.graph import NamedNodesAttributes
 from anemoi.models.layers.mapper import GraphEdgeMixin
 from anemoi.training.diagnostics.plots import argsort_variablename_variablelevel
 from anemoi.training.diagnostics.plots import get_scatter_frame
@@ -44,16 +46,8 @@ from anemoi.training.diagnostics.plots import plot_loss
 from anemoi.training.diagnostics.plots import plot_power_spectrum
 from anemoi.training.diagnostics.plots import plot_predicted_multilevel_flat_sample
 from anemoi.training.losses.base import BaseLoss
-from anemoi.training.schemas.base_schema import BaseSchema  # noqa: TC001
-
-if TYPE_CHECKING:
-    from typing import Any
-
-    import pytorch_lightning as pl
-    from matplotlib.colors import Colormap
-    from omegaconf import OmegaConf
-
-    from anemoi.models.layers.graph import NamedNodesAttributes
+from anemoi.training.schemas.base_schema import BaseSchema
+from anemoi.training.train.tasks import GraphInterpolator
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,10 +66,9 @@ class BasePlotCallback(Callback, ABC):
         """
         super().__init__()
         self.config = config
-        self.save_basedir = config.hardware.paths.plots
+        self.save_basedir = config.system.output.plots
 
         self.post_processors = None
-        self.pre_processors = None
         self.latlons = None
         init_plot_settings()
 
@@ -99,10 +92,22 @@ class BasePlotCallback(Callback, ABC):
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
+    def _get_init_step(self, rollout_step: int, mode: tuple) -> int:
+        """Return index of initial step for plotting."""
+        return rollout_step if mode == "time_interp" else 0
+
+    def _get_output_times(self, config: BaseSchema, pl_module: pl.LightningModule) -> tuple:
+        """Return times outputted by the model."""
+        if isinstance(pl_module, GraphInterpolator):
+            output_times = (len(config.training.explicit_times.target), "time_interp")
+        else:
+            output_times = (getattr(pl_module, "rollout", 0), "forecast")
+        return output_times
+
     @rank_zero_only
     def _output_figure(
         self,
-        logger: pl.loggers.base.LightningLoggerBase,
+        logger: pl.loggers.logger.Logger,
         fig: plt.Figure,
         epoch: int,
         tag: str = "gnn",
@@ -142,7 +147,7 @@ class BasePlotCallback(Callback, ABC):
     @rank_zero_only
     def _output_gif(
         self,
-        logger: pl.loggers.base.LightningLoggerBase,
+        logger: pl.loggers.logger.Logger,
         fig: plt.Figure,
         anim: animation.ArtistAnimation,
         epoch: int,
@@ -259,6 +264,9 @@ class BasePerBatchPlotCallback(BasePlotCallback):
         super().__init__(config)
         self.every_n_batches = every_n_batches or self.config.diagnostics.plot.frequency.batch
 
+        if self.config.diagnostics.plot.asynchronous and self.config.dataloader.read_group_size > 1:
+            LOGGER.warning("Asynchronous plotting can result in NCCL timeouts with reader_group_size > 1.")
+
     def on_validation_batch_end(
         self,
         trainer: pl.Trainer,
@@ -268,15 +276,22 @@ class BasePerBatchPlotCallback(BasePlotCallback):
         batch_idx: int,
         **kwargs,
     ) -> None:
-        if (
-            self.config.diagnostics.plot.asynchronous
-            and self.config.dataloader.read_group_size > 1
-            and pl_module.local_rank == 0
-        ):
-            LOGGER.warning("Asynchronous plotting can result in NCCL timeouts with reader_group_size > 1.")
-
         if batch_idx % self.every_n_batches == 0:
+            # gather tensors if necessary
             batch = pl_module.allgather_batch(batch)
+            # output: [loss, [pred1, pred2, ...]], gather predictions for plotting
+            output = [output[0], [pl_module.allgather_batch(pred) for pred in output[1]]]
+
+            # When running in Async mode, it might happen that in the last epoch these tensors
+            # have been moved to the cpu (and then the denormalising would fail as the 'input_tensor' would be on CUDA
+            # but internal ones would be on the cpu), The lines below allow to address this problem
+            self.post_processors = copy.deepcopy(pl_module.model.post_processors)
+            for post_processor in self.post_processors.processors.values():
+                if hasattr(post_processor, "nan_locations"):
+                    post_processor.nan_locations = pl_module.allgather_batch(post_processor.nan_locations)
+            self.post_processors = self.post_processors.cpu()
+
+            output_times = self._get_output_times(self.config, pl_module)
 
             self.plot(
                 trainer,
@@ -285,6 +300,7 @@ class BasePerBatchPlotCallback(BasePlotCallback):
                 batch,
                 batch_idx,
                 epoch=trainer.current_epoch,
+                output_times=output_times,
                 **kwargs,
             )
 
@@ -314,7 +330,10 @@ class BasePerEpochPlotCallback(BasePlotCallback):
         **kwargs,
     ) -> None:
         if trainer.current_epoch % self.every_n_epochs == 0:
-            self.plot(trainer, pl_module, epoch=trainer.current_epoch, **kwargs)
+
+            output_times = self._get_output_times(self.config, pl_module)
+
+            self.plot(trainer, pl_module, epoch=trainer.current_epoch, output_times=output_times, **kwargs)
 
 
 class LongRolloutPlots(BasePlotCallback):
@@ -412,6 +431,9 @@ class LongRolloutPlots(BasePlotCallback):
             every_n_epochs,
         )
 
+        if self.config.diagnostics.plot.asynchronous and self.config.dataloader.read_group_size > 1:
+            LOGGER.warning("Asynchronous plotting can result in NCCL timeouts with reader_group_size > 1.")
+
     def _plot(
         self,
         trainer: pl.Trainer,
@@ -433,10 +455,13 @@ class LongRolloutPlots(BasePlotCallback):
             )
             for name in self.parameters
         }
-        if self.post_processors is None:
-            self.post_processors = copy.deepcopy(pl_module.model.post_processors).cpu()
         if self.latlons is None:
-            self.latlons = np.rad2deg(pl_module.latlons_data.clone().cpu().numpy())
+            self.latlons = pl_module.model.model._graph_data[pl_module.model.model._graph_name_data].x.detach()
+            self.latlons = self.latlons.cpu().numpy()
+            self.latlons = (
+                self.latlons if np.any(np.abs(self.latlons[:, 0]) > np.pi)
+                else np.rad2deg(self.latlons)
+            )
 
         assert batch.shape[1] >= self.max_rollout + pl_module.multi_step, (
             "Batch length not sufficient for requested validation rollout length! "
@@ -444,28 +469,31 @@ class LongRolloutPlots(BasePlotCallback):
         )
 
         # prepare input tensor for plotting
-        input_batch = pl_module.model.pre_processors(batch, in_place=False)
-        input_tensor_0 = input_batch[
-            self.sample_idx,
-            pl_module.multi_step - 1,
-            ...,
-            pl_module.data_indices.internal_data.output.full,
-        ].cpu()
-        data_0 = self.post_processors(input_tensor_0).numpy()
+        # the batch is already preprocessed in-place
+        input_tensor_0 = (
+            batch[
+                :,
+                pl_module.multi_step - 1,
+                ...,
+                pl_module.data_indices.data.output.full,
+            ]
+            .detach()
+            .cpu()
+        )
+        data_0 = self.post_processors(input_tensor_0)[self.sample_idx]
 
         if self.video_rollout:
             data_over_time = []
             # collect min and max values for each variable for the colorbar
             vmin, vmax = (np.inf * np.ones(len(plot_parameters_dict)), -np.inf * np.ones(len(plot_parameters_dict)))
 
-        # Plot for each rollout step# Plot for each rollout step
+        # Plot for each rollout step
         with torch.no_grad():
             for rollout_step, (_, _, y_pred) in enumerate(
                 pl_module.rollout_step(
                     batch,
                     rollout=self.max_rollout,
-                    validation_mode=False,
-                    training_mode=False,
+                    validation_mode=True,
                 ),
             ):
                 # plot only if the current rollout step is in the list of rollout steps
@@ -473,7 +501,7 @@ class LongRolloutPlots(BasePlotCallback):
                     self._plot_rollout_step(
                         pl_module,
                         plot_parameters_dict,
-                        input_batch,
+                        batch,
                         data_0,
                         rollout_step,
                         y_pred,
@@ -519,19 +547,23 @@ class LongRolloutPlots(BasePlotCallback):
         y_pred: torch.Tensor,
         batch_idx: int,
         epoch: int,
-        logger: pl.loggers.base.LightningLoggerBase,
+        logger: pl.loggers.logger.Logger,
     ) -> None:
         """Plot the predicted output, input, true target and error plots for a given rollout step."""
         # prepare true output tensor for plotting
-        input_tensor_rollout_step = input_batch[
-            self.sample_idx,
-            pl_module.multi_step + rollout_step,  # (pl_module.multi_step - 1) + (rollout_step + 1)
-            ...,
-            pl_module.data_indices.internal_data.output.full,
-        ].cpu()
-        data_rollout_step = self.post_processors(input_tensor_rollout_step).numpy()
+        input_tensor_rollout_step = (
+            input_batch[
+                :,
+                pl_module.multi_step + rollout_step,  # (pl_module.multi_step - 1) + (rollout_step + 1)
+                ...,
+                pl_module.data_indices.data.output.full,
+            ]
+            .detach()
+            .cpu()
+        )
+        data_rollout_step = self.post_processors(input_tensor_rollout_step)[self.sample_idx]
         # predicted output tensor
-        output_tensor = self.post_processors(y_pred[self.sample_idx : self.sample_idx + 1, ...].cpu()).numpy()
+        output_tensor = self.post_processors(y_pred.detach().cpu())[self.sample_idx : self.sample_idx + 1]
 
         fig = plot_predicted_multilevel_flat_sample(
             plot_parameters_dict,
@@ -547,8 +579,8 @@ class LongRolloutPlots(BasePlotCallback):
             logger,
             fig,
             epoch=epoch,
-            tag=f"gnn_pred_val_sample_rstep{rollout_step + 1:03d}_batch{batch_idx:04d}_rank0",
-            exp_log_tag=f"val_pred_sample_rstep{rollout_step + 1:03d}_rank{pl_module.local_rank:01d}",
+            tag=f"pred_val_sample_rstep{rollout_step + 1:03d}_batch{batch_idx:04d}_rank{pl_module.local_rank:01d}",
+            exp_log_tag=f"pred_val_sample_rstep{rollout_step + 1:03d}_rank{pl_module.local_rank:01d}",
         )
         fig = plot_power_spectrum(
             plot_parameters_dict,
@@ -575,11 +607,11 @@ class LongRolloutPlots(BasePlotCallback):
     ) -> tuple[list, np.ndarray, np.ndarray]:
         """Store the data for each frame of the video."""
         # prepare predicted output tensors for video
-        output_tensor = self.post_processors(y_pred[self.sample_idx : self.sample_idx + 1, ...].cpu()).numpy()
+        output_tensor = self.post_processors(y_pred.detach().cpu())[self.sample_idx : self.sample_idx + 1]
         data_over_time.append(output_tensor[0, 0, :, np.array(list(plot_parameters_dict.keys()))])
         # update min and max values for each variable for the colorbar
-        vmin[:] = np.minimum(vmin, np.nanmin(data_over_time[-1], axis=1))
-        vmax[:] = np.maximum(vmax, np.nanmax(data_over_time[-1], axis=1))
+        vmin[:] = np.minimum(vmin, np.nanmin(data_over_time[-1], axis=0))
+        vmax[:] = np.maximum(vmax, np.nanmax(data_over_time[-1], axis=0))
         return data_over_time, vmin, vmax
 
     @rank_zero_only
@@ -593,7 +625,7 @@ class LongRolloutPlots(BasePlotCallback):
         rollout_step: int,
         batch_idx: int,
         epoch: int,
-        logger: pl.loggers.base.LightningLoggerBase,
+        logger: pl.loggers.logger.Logger,
         animation_interval: int = 400,
     ) -> None:
         """Generate the video animation for the rollout."""
@@ -602,7 +634,7 @@ class LongRolloutPlots(BasePlotCallback):
             frames = []
             # Prepare the figure
             fig, ax = plt.subplots(figsize=(10, 6), dpi=72)
-            cmap = "twilight" if variable_name == "mwd" else "viridis"
+            cmap = "viridis"
 
             # Create initial data and colorbar
             ax, scatter_frame = get_scatter_frame(
@@ -621,7 +653,7 @@ class LongRolloutPlots(BasePlotCallback):
             for frame_data in data_over_time:
                 ax, scatter_frame = get_scatter_frame(
                     ax,
-                    frame_data[idx],
+                    frame_data[:, idx],
                     self.latlons,
                     cmap=cmap,
                     vmin=vmin[idx],
@@ -636,7 +668,7 @@ class LongRolloutPlots(BasePlotCallback):
                 fig,
                 anim,
                 epoch=epoch,
-                tag=f"gnn_pred_val_animation_{variable_name}_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank0",
+                tag=f"pred_val_animation_{variable_name}_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank0",
             )
 
     def on_validation_batch_end(
@@ -649,6 +681,13 @@ class LongRolloutPlots(BasePlotCallback):
     ) -> None:
         if (batch_idx) == 0 and (trainer.current_epoch + 1) % self.every_n_epochs == 0:
             batch = pl_module.allgather_batch(batch)
+            output = [output[0], [pl_module.allgather_batch(pred) for pred in output[1]]]
+
+            self.post_processors = copy.deepcopy(pl_module.model.post_processors)
+            for post_processor in self.post_processors.processors.values():
+                if hasattr(post_processor, "nan_locations"):
+                    post_processor.nan_locations = pl_module.allgather_batch(post_processor.nan_locations)
+            self.post_processors = self.post_processors.cpu()
 
             precision_mapping = {
                 "16-mixed": torch.float16,
@@ -721,7 +760,13 @@ class GraphTrainableFeaturesPlot(BasePerEpochPlotCallback):
         else:
             LOGGER.warning("There are no trainable node attributes to plot.")
 
-        if len(edge_trainable_modules := self.get_edge_trainable_modules(model)):
+        from anemoi.models.models import AnemoiModelEncProcDecHierarchical
+
+        if isinstance(model, AnemoiModelEncProcDecHierarchical):
+            LOGGER.warning(
+                "Edge trainable features are not supported for Hierarchical models, skipping plot generation.",
+            )
+        elif len(edge_trainable_modules := self.get_edge_trainable_modules(model)):
             fig = plot_graph_edge_features(model, edge_trainable_modules, q_extreme_limit=self.q_extreme_limit)
 
             self._output_figure(
@@ -733,6 +778,16 @@ class GraphTrainableFeaturesPlot(BasePerEpochPlotCallback):
             )
         else:
             LOGGER.warning("There are no trainable edge attributes to plot.")
+
+    @rank_zero_only
+    def on_validation_epoch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        **kwargs,
+    ) -> None:
+
+        self.plot(trainer, pl_module, epoch=trainer.current_epoch, **kwargs)
 
 
 class PlotLoss(BasePerBatchPlotCallback):
@@ -838,7 +893,7 @@ class PlotLoss(BasePerBatchPlotCallback):
 
         # set x-ticks
         x_tick_positions = np.cumsum(group_counts) - group_counts / 2 - 0.5
-        xticks = dict(zip(unique_group_list, x_tick_positions))
+        xticks = dict(zip(unique_group_list, x_tick_positions, strict=False))
 
         legend_patches = []
         for group_idx, group in enumerate(unique_group_list):
@@ -864,17 +919,18 @@ class PlotLoss(BasePerBatchPlotCallback):
     def _plot(
         self,
         trainer: pl.Trainer,
-        pl_module: pl.Lightning_module,
+        pl_module: pl.LightningModule,
         outputs: list[torch.Tensor],
         batch: torch.Tensor,
         batch_idx: int,
         epoch: int,
+        output_times: tuple,
     ) -> None:
         logger = trainer.logger
         _ = batch_idx
 
-        parameter_names = list(pl_module.data_indices.internal_model.output.name_to_index.keys())
-        parameter_positions = list(pl_module.data_indices.internal_model.output.name_to_index.values())
+        parameter_names = list(pl_module.data_indices.model.output.name_to_index.keys())
+        parameter_positions = list(pl_module.data_indices.model.output.name_to_index.values())
         # reorder parameter_names by position
         self.parameter_names = [parameter_names[i] for i in np.argsort(parameter_positions)]
         self.metadata_variables = pl_module.model.metadata["dataset"].get("variables_metadata")
@@ -885,22 +941,21 @@ class PlotLoss(BasePerBatchPlotCallback):
             metadata_variables=self.metadata_variables,
         )
         self.parameter_names = [self.parameter_names[i] for i in argsort_indices]
-        if not isinstance(pl_module.loss, BaseLoss):
+        if not isinstance(self.loss, BaseLoss):
             LOGGER.warning(
                 "Loss function must be a subclass of BaseLoss, or provide `squash`.",
                 RuntimeWarning,
             )
 
-        batch = pl_module.model.pre_processors(batch, in_place=False)
-        for rollout_step in range(pl_module.rollout):
+        for rollout_step in range(output_times[0]):
             y_hat = outputs[1][rollout_step]
             y_true = batch[
                 :,
                 pl_module.multi_step + rollout_step,
                 ...,
-                pl_module.data_indices.internal_data.output.full,
+                pl_module.data_indices.data.output.full,
             ]
-            loss = pl_module.loss(y_hat, y_true, squash=False).cpu().numpy()
+            loss = self.loss(y_hat, y_true, squash=False).detach().cpu().numpy()
 
             sort_by_parameter_group, colors, xticks, legend_patches = self.sort_and_color_by_parameter_group
             loss = loss[argsort_indices]
@@ -910,12 +965,83 @@ class PlotLoss(BasePerBatchPlotCallback):
                 logger,
                 fig,
                 epoch=epoch,
-                tag=f"loss_rstep_rstep{rollout_step:02d}_rank{pl_module.local_rank:01d}",
+                tag=f"loss_rstep{rollout_step:02d}_rank{pl_module.local_rank:01d}",
                 exp_log_tag=f"loss_sample_rstep{rollout_step:02d}_rank{pl_module.local_rank:01d}",
             )
 
+    def on_validation_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        output: list[torch.Tensor],
+        batch: torch.Tensor,
+        batch_idx: int,
+    ) -> None:
 
-class PlotSample(BasePerBatchPlotCallback):
+        if batch_idx % self.every_n_batches == 0:
+
+            self.loss = copy.deepcopy(pl_module.loss)
+
+            # gather nan-mask weight shards, don't gather if constant in grid dimension (broadcastable)
+            if (
+                hasattr(self.loss.scaler, "nan_mask_weights")
+                and self.loss.scaler.nan_mask_weights.shape[pl_module.grid_dim] != 1
+            ):
+                self.loss.scaler.nan_mask_weights = pl_module.allgather_batch(self.loss.scaler.nan_mask_weights)
+
+            super().on_validation_batch_end(
+                trainer,
+                pl_module,
+                output,
+                batch,
+                batch_idx,
+            )
+
+
+class BasePlotAdditionalMetrics(BasePerBatchPlotCallback):
+    """Base processing class for additional metrics."""
+
+    def process(
+        self,
+        pl_module: pl.LightningModule,
+        outputs: list,
+        batch: torch.Tensor,
+        output_times: tuple,
+    ) -> tuple[np.ndarray, np.ndarray]:
+
+        if self.latlons is None:
+            self.latlons = pl_module.model.model._graph_data[pl_module.model.model._graph_name_data].x.detach()
+            self.latlons = self.latlons.cpu().numpy()
+            self.latlons = (
+                self.latlons if np.any(np.abs(self.latlons[:, 0]) > np.pi)
+                else np.rad2deg(self.latlons)
+            )
+
+        input_tensor = (
+            batch[
+                :,
+                pl_module.multi_step - 1 : pl_module.multi_step + output_times[0] + 1,
+                ...,
+                pl_module.data_indices.data.output.full,
+            ]
+            .detach()
+            .cpu()
+        )
+        data = self.post_processors(input_tensor)[self.sample_idx]
+        output_tensor = torch.cat(
+            tuple(
+                self.post_processors(x[:, ...].detach().cpu(), in_place=False)[self.sample_idx : self.sample_idx + 1]
+                for x in outputs[1]
+            ),
+        )
+        output_tensor = pl_module.output_mask.apply(output_tensor, dim=2, fill_value=np.nan).numpy()
+        data[1:, ...] = pl_module.output_mask.apply(data[1:, ...], dim=2, fill_value=np.nan)
+        data = data.numpy()
+
+        return data, output_tensor
+
+
+class PlotSample(BasePlotAdditionalMetrics):
     """Plots a post-processed sample: input, target and prediction."""
 
     def __init__(
@@ -975,6 +1101,7 @@ class PlotSample(BasePerBatchPlotCallback):
         batch: torch.Tensor,
         batch_idx: int,
         epoch: int,
+        output_times: tuple,
     ) -> None:
         logger = trainer.logger
 
@@ -988,40 +1115,19 @@ class PlotSample(BasePerBatchPlotCallback):
             for name in self.parameters
         }
 
-        # When running in Async mode, it might happen that in the last epoch these tensors
-        # have been moved to the cpu (and then the denormalising would fail as the 'input_tensor' would be on CUDA
-        # but internal ones would be on the cpu), The lines below allow to address this problem
-        if self.post_processors is None:
-            # Copy to be used across all the training cycle
-            self.post_processors = copy.deepcopy(pl_module.model.post_processors).cpu()
-        if self.latlons is None:
-            self.latlons = np.rad2deg(pl_module.latlons_data.clone().cpu().numpy())
+        data, output_tensor = self.process(pl_module, outputs, batch, output_times)
+
         local_rank = pl_module.local_rank
 
-        batch = pl_module.model.pre_processors(batch, in_place=False)
-        input_tensor = batch[
-            self.sample_idx,
-            pl_module.multi_step - 1 : pl_module.multi_step + pl_module.rollout + 1,
-            ...,
-            pl_module.data_indices.internal_data.output.full,
-        ].cpu()
-        data = self.post_processors(input_tensor)
+        for rollout_step in range(output_times[0]):
+            init_step = self._get_init_step(rollout_step, output_times[1])
 
-        output_tensor = self.post_processors(
-            torch.cat(tuple(x[self.sample_idx : self.sample_idx + 1, ...].cpu() for x in outputs[1])),
-            in_place=False,
-        )
-        output_tensor = pl_module.output_mask.apply(output_tensor, dim=1, fill_value=np.nan).numpy()
-        data[1:, ...] = pl_module.output_mask.apply(data[1:, ...], dim=2, fill_value=np.nan)
-        data = data.numpy()
-
-        for rollout_step in range(pl_module.rollout):
             fig = plot_predicted_multilevel_flat_sample(
                 plot_parameters_dict,
                 self.per_sample,
                 self.latlons,
                 self.accumulation_levels_plot,
-                data[0, ...].squeeze(),
+                data[init_step, ...].squeeze(),
                 data[rollout_step + 1, ...].squeeze(),
                 output_tensor[rollout_step, ...],
                 datashader=self.datashader_plotting,
@@ -1033,49 +1139,9 @@ class PlotSample(BasePerBatchPlotCallback):
                 logger,
                 fig,
                 epoch=epoch,
-                tag=f"gnn_pred_val_sample_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank0",
+                tag=f"pred_val_sample_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank{local_rank:01d}",
                 exp_log_tag=f"val_pred_sample_rstep{rollout_step:02d}_rank{local_rank:01d}",
             )
-
-
-class BasePlotAdditionalMetrics(BasePerBatchPlotCallback):
-    """Base processing class for additional metrics."""
-
-    def process(
-        self,
-        pl_module: pl.LightningModule,
-        outputs: list,
-        batch: torch.Tensor,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        # When running in Async mode, it might happen that in the last epoch these tensors
-        # have been moved to the cpu (and then the denormalising would fail as the 'input_tensor' would be on CUDA
-        # but internal ones would be on the cpu), The lines below allow to address this problem
-        if self.pre_processors is None:
-            # Copy to be used across all the training cycle
-            self.pre_processors = copy.deepcopy(pl_module.model.pre_processors).cpu()
-        if self.post_processors is None:
-            # Copy to be used across all the training cycle
-            self.post_processors = copy.deepcopy(pl_module.model.post_processors).cpu()
-        if self.latlons is None:
-            self.latlons = np.rad2deg(pl_module.latlons_data.clone().cpu().numpy())
-
-        batch = pl_module.model.pre_processors(batch, in_place=False)
-        input_tensor = batch[
-            self.sample_idx,
-            pl_module.multi_step - 1 : pl_module.multi_step + pl_module.rollout + 1,
-            ...,
-            pl_module.data_indices.internal_data.output.full,
-        ].cpu()
-
-        data = self.post_processors(input_tensor)
-        output_tensor = self.post_processors(
-            torch.cat(tuple(x[self.sample_idx : self.sample_idx + 1, ...].cpu() for x in outputs[1])),
-            in_place=False,
-        )
-        output_tensor = pl_module.output_mask.apply(output_tensor, dim=1, fill_value=np.nan).numpy()
-        data[1:, ...] = pl_module.output_mask.apply(data[1:, ...], dim=2, fill_value=np.nan)
-        data = data.numpy()
-        return data, output_tensor
 
 
 class PlotSpectrum(BasePlotAdditionalMetrics):
@@ -1121,14 +1187,15 @@ class PlotSpectrum(BasePlotAdditionalMetrics):
         batch: torch.Tensor,
         batch_idx: int,
         epoch: int,
+        output_times: tuple,
     ) -> None:
         logger = trainer.logger
 
         local_rank = pl_module.local_rank
-        data, output_tensor = self.process(pl_module, outputs, batch)
+        data, output_tensor = self.process(pl_module, outputs, batch, output_times)
 
-        for rollout_step in range(pl_module.rollout):
-            # Build dictionary of inidicies and parameters to be plotted
+        for rollout_step in range(output_times[0]):
+            # Build dictionary of indices and parameters to be plotted
 
             diagnostics = [] if self.config.data.diagnostic is None else self.config.data.diagnostic
             plot_parameters_dict_spectrum = {
@@ -1139,10 +1206,12 @@ class PlotSpectrum(BasePlotAdditionalMetrics):
                 for name in self.parameters
             }
 
+            init_step = self._get_init_step(rollout_step, output_times[1])
+
             fig = plot_power_spectrum(
                 plot_parameters_dict_spectrum,
                 self.latlons,
-                data[0, ...].squeeze(),
+                data[init_step, ...].squeeze(),
                 data[rollout_step + 1, ...].squeeze(),
                 output_tensor[rollout_step, ...],
                 min_delta=self.min_delta,
@@ -1152,8 +1221,8 @@ class PlotSpectrum(BasePlotAdditionalMetrics):
                 logger,
                 fig,
                 epoch=epoch,
-                tag=f"gnn_pred_val_spec_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank0",
-                exp_log_tag=f"val_pred_spec_rstep{rollout_step:02d}_rank{local_rank:01d}",
+                tag=f"pred_val_spec_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank{local_rank:01d}",
+                exp_log_tag=f"pred_val_spec_rstep{rollout_step:02d}_rank{local_rank:01d}",
             )
 
 
@@ -1169,6 +1238,7 @@ class PlotHistogram(BasePlotAdditionalMetrics):
         sample_idx: int,
         parameters: list[str],
         precip_and_related_fields: list[str] | None = None,
+        log_scale: bool = False,
         every_n_batches: int | None = None,
     ) -> None:
         """Initialise the PlotHistogram callback.
@@ -1190,6 +1260,7 @@ class PlotHistogram(BasePlotAdditionalMetrics):
         self.sample_idx = sample_idx
         self.parameters = parameters
         self.precip_and_related_fields = precip_and_related_fields
+        self.log_scale = log_scale
         LOGGER.info(
             "Using precip histogram plotting method for fields: %s.",
             self.precip_and_related_fields,
@@ -1204,15 +1275,16 @@ class PlotHistogram(BasePlotAdditionalMetrics):
         batch: torch.Tensor,
         batch_idx: int,
         epoch: int,
+        output_times: tuple,
     ) -> None:
         logger = trainer.logger
 
         local_rank = pl_module.local_rank
-        data, output_tensor = self.process(pl_module, outputs, batch)
+        data, output_tensor = self.process(pl_module, outputs, batch, output_times)
 
-        for rollout_step in range(pl_module.rollout):
+        for rollout_step in range(output_times[0]):
 
-            # Build dictionary of inidicies and parameters to be plotted
+            # Build dictionary of indices and parameters to be plotted
             diagnostics = [] if self.config.data.diagnostic is None else self.config.data.diagnostic
 
             plot_parameters_dict_histogram = {
@@ -1223,18 +1295,21 @@ class PlotHistogram(BasePlotAdditionalMetrics):
                 for name in self.parameters
             }
 
+            init_step = self._get_init_step(rollout_step, output_times[1])
+
             fig = plot_histogram(
                 plot_parameters_dict_histogram,
-                data[0, ...].squeeze(),
+                data[init_step, ...].squeeze(),
                 data[rollout_step + 1, ...].squeeze(),
                 output_tensor[rollout_step, ...],
                 self.precip_and_related_fields,
+                self.log_scale,
             )
 
             self._output_figure(
                 logger,
                 fig,
                 epoch=epoch,
-                tag=f"gnn_pred_val_histo_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank0",
-                exp_log_tag=f"val_pred_histo_rstep{rollout_step:02d}_rank{local_rank:01d}",
+                tag=f"pred_val_histo_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank{local_rank:01d}",
+                exp_log_tag=f"pred_val_histo_rstep{rollout_step:02d}_rank{local_rank:01d}",
             )

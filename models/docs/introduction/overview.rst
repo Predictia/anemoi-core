@@ -87,8 +87,8 @@ to process the input data.
 The layers are designed as extensible classes to allow for easy
 experimentation and switching out of components.
 
-Mappers
-=======
+Graph Mappers
+=============
 
 The layers implement `Mappers`, which maps data between the input grid
 and the internal hidden grid. The `Mappers` are used as encoder and
@@ -99,9 +99,10 @@ Processors
 ==========
 
 Additionally, the layers implement `Processors` which are used to
-process the data on the hidden grid. The `Processors` use a chunking
-strategy with `Chunks` that pass a subset of layers to `Blocks` to allow
-for more efficient processing of the data.
+process the data on the hidden grid. The `Processors` use a series of
+`Blocks` to process the data. These `Blocks` can be partitioned into
+checkpointed chunks via `num_chunks` to reduce memory usage during
+training.
 
 **************
  Data Indices
@@ -124,71 +125,3 @@ The `distributed` module provides utilities for distributed training of
 the model. This includes includes the splitting and gathering of the
 model and its tensors / parameters across multiple GPUs. This process is
 also known as "model shardings".
-
-***************
- Layer Kernels
-***************
-
-Layer kernels provide a flexible mechanism to customize the
-implementation of linear layers and layer normalization in different
-parts of the model (encoder, processor, decoder) through the
-`config.yaml`.
-
-Example configuration:
-
-.. code:: yaml
-
-   layer_kernels:
-      processor:
-         LayerNorm:
-            _target_: torch.nn.LayerNorm
-            _partial_: True
-            # Any arguments to your chosen function go here
-
-         Linear:
-            _target_: torch.nn.Linear
-            _partial_: True
-            # Any arguments to your chosen function go here
-
-         QueryNorm:
-            _target_: anemoi.models.layers.normalization.AutocastLayerNorm
-            _partial_: True
-            bias: False
-
-         KeyNorm:
-            _target_: anemoi.models.layers.normalization.AutocastLayerNorm
-            _partial_: True
-            bias: False
-
-      encoder:
-         LayerNorm:
-            _target_: torch.nn.LayerNorm
-            _partial_: True
-
-         Linear:
-            _target_: torch.nn.Linear
-            _partial_: True
-
-      decoder:
-         LayerNorm:
-            _target_: torch.nn.LayerNorm
-            _partial_: True
-
-         Linear:
-            _target_: torch.nn.Linear
-            _partial_: True
-
-.. note::
-
-   If no layer kernels are specified in the configuration, the following
-   defaults are used:
-
-   -  ``LayerNorm``: ``torch.nn.LayerNorm``
-   -  ``Linear``: ``torch.nn.Linear``
-
-Layer kernels are particularly useful when:
-
-#. You need to use specialized implementations for efficiency
-#. You want to experiment with different normalization techniques
-#. You need to customize the behavior of specific layers in different
-   parts of the model

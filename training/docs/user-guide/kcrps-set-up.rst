@@ -111,10 +111,9 @@ conditional layer norm.
       processor:
          LayerNorm:
             _target_: anemoi.models.layers.normalization.ConditionalLayerNorm
-            _partial_: True
             normalized_shape: ${model.num_channels}
             condition_shape: ${model.noise_injector.noise_channels_dim}
-            w_one_bias_zero_init: True
+            zero_init: True
             autocast: false
          ...
 
@@ -132,7 +131,7 @@ different layer norm in the processor, here the
    :end-before: # Changes in strategy
 
 The model task is set to
-:class:`anemoi.training.train.forecaster.GraphEnsForecaster` for CRPS
+:class:`anemoi.training.train.tasks.GraphEnsForecaster` for CRPS
 training to deal with the ensemble members. The number of ensemble
 members per device needs to be specified.
 

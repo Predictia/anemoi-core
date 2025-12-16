@@ -8,11 +8,10 @@
 # nor does it submit to any jurisdiction.
 
 
-from __future__ import annotations
-
 import logging
 
 import torch
+from torch.distributed.distributed_c10d import ProcessGroup
 
 from anemoi.training.losses.mse import MSELoss
 
@@ -31,6 +30,8 @@ class RMSELoss(MSELoss):
         squash: bool = True,
         scaler_indices: tuple[int, ...] | None = None,
         without_scalers: list[str] | list[int] | None = None,
+        grid_shard_slice: slice | None = None,
+        group: ProcessGroup | None = None,
     ) -> torch.Tensor:
         """Calculates the RMSE loss.
 
@@ -47,6 +48,10 @@ class RMSELoss(MSELoss):
         without_scalers: list[str] | list[int] | None, optional
             list of scalers to exclude from scaling. Can be list of names or dimensions to exclude.
             By default None
+        grid_shard_slice : slice, optional
+            Slice of the grid if x comes sharded, by default None
+        group: ProcessGroup, optional
+            Distributed group to reduce over, by default None
 
         Returns
         -------
@@ -59,5 +64,7 @@ class RMSELoss(MSELoss):
             squash=squash,
             scaler_indices=scaler_indices,
             without_scalers=without_scalers,
+            grid_shard_slice=grid_shard_slice,
+            group=group,
         )
         return torch.sqrt(mse)

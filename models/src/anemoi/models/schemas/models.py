@@ -12,23 +12,31 @@ from __future__ import annotations
 import logging
 from enum import Enum
 from typing import Annotated
+from typing import Any
 from typing import Literal
+from typing import Optional
 from typing import Union
 
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import Field
 from pydantic import NonNegativeInt
+from pydantic import PositiveFloat
+from pydantic import PositiveInt
 from pydantic import model_validator
 
 from anemoi.utils.schemas import BaseModel
 
 from .decoder import GNNDecoderSchema  # noqa: TC001
 from .decoder import GraphTransformerDecoderSchema  # noqa: TC001
+from .decoder import TransformerDecoderSchema  # noqa: TC001
 from .encoder import GNNEncoderSchema  # noqa: TC001
 from .encoder import GraphTransformerEncoderSchema  # noqa: TC001
+from .encoder import TransformerEncoderSchema  # noqa: TC001
 from .processor import GNNProcessorSchema  # noqa: TC001
 from .processor import GraphTransformerProcessorSchema  # noqa: TC001
+from .processor import PointWiseMLPProcessorSchema  # noqa: TC001
 from .processor import TransformerProcessorSchema  # noqa: TC001
+from .residual import ResidualConnectionSchema
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +50,14 @@ class DefinedModels(str, Enum):
     ANEMOI_MODEL_ENC_HIERPROC_DEC_SHORT = "anemoi.models.models.AnemoiModelEncProcDecHierarchical"
     ANEMOI_MODEL_INTERPENC_PROC_DEC = "anemoi.models.models.interpolator.AnemoiModelEncProcDecInterpolator"
     ANEMOI_MODEL_INTERPENC_PROC_DEC_SHORT = "anemoi.models.models.AnemoiModelEncProcDecInterpolator"
+    ANEMOI_DIFFUSION_MODEL_ENC_PROC_DEC = (
+        "anemoi.models.models.diffusion_encoder_processor_decoder.AnemoiDiffusionModelEncProcDec"
+    )
+    ANEMOI_DIFFUSION_MODEL_ENC_PROC_DEC_SHORT = "anemoi.models.models.AnemoiDiffusionModelEncProcDec"
+    ANEMOI_DIFFUSION_TEND_MODEL_ENC_PROC_DEC = (
+        "anemoi.models.models.diffusion_encoder_processor_decoder.AnemoiDiffusionTendModelEncProcDec"
+    )
+    ANEMOI_DIFFUSION_TEND_MODEL_ENC_PROC_DEC_SHORT = "anemoi.models.models.AnemoiDiffusionTendModelEncProcDec"
 
 
 class Model(BaseModel):
@@ -49,6 +65,11 @@ class Model(BaseModel):
     "Model object defined in anemoi.models.model."
     convert_: str = Field("all", alias="_convert_")
     "The target's parameters to convert to primitive containers. Other parameters will use OmegaConf. Default to all."
+
+
+class DiffusionModel(Model):
+    diffusion: DiffusionSchema = Field(default=None)
+    "Diffusion configuration for diffusion models"
 
 
 class TrainableParameters(PydanticBaseModel):
@@ -122,8 +143,8 @@ class NormalizedReluBoundingSchema(BaseModel):
         return self
 
 
-class LeakyNormalizedReluBoundingSchema(NormalizedReluBoundingSchema):
-    target_: Literal["anemoi.models.layers.bounding.LeakyNormalizedReluBounding"] = Field(..., alias="_target_")
+class NormalizedLeakyReluBoundingSchema(NormalizedReluBoundingSchema):
+    target_: Literal["anemoi.models.layers.bounding.NormalizedLeakyReluBounding"] = Field(..., alias="_target_")
     "Leaky normalized Relu bounding object defined in anemoi.models.layers.bounding."
 
 
@@ -136,7 +157,7 @@ Bounding = Annotated[
         HardtanhBoundingSchema,
         LeakyHardtanhBoundingSchema,
         NormalizedReluBoundingSchema,
-        LeakyNormalizedReluBoundingSchema,
+        NormalizedLeakyReluBoundingSchema,
     ],
     Field(discriminator="target_"),
 ]
@@ -155,13 +176,32 @@ class Boolean1DSchema(BaseModel):
 OutputMaskSchemas = Union[NoOutputMaskSchema, Boolean1DSchema]
 
 
+class DiffusionSchema(BaseModel):
+    sigma_data: PositiveFloat = Field(default=1.0, examples=[1.0])
+    "Data scaling parameter"
+    noise_channels: PositiveInt = Field(default=32, examples=[32])
+    "Number of channels for noise embedding"
+    noise_cond_dim: PositiveInt = Field(default=16, examples=[16])
+    "Dimension of noise conditioning"
+    sigma_max: PositiveFloat = Field(default=100.0, examples=[100.0])
+    "Maximum noise level for training"
+    sigma_min: PositiveFloat = Field(default=0.02, examples=[0.02])
+    "Minimum noise level for training"
+    rho: PositiveFloat = Field(default=7.0, examples=[7.0])
+    "Karras schedule parameter for training noise distribution"
+    noise_embedder: dict = Field(default_factory=dict)
+    "Noise embedder configuration with _target_ for Hydra instantiation"
+    inference_defaults: dict = Field(default_factory=dict)
+    "Default parameters for inference sampling"
+
+
 class BaseModelSchema(PydanticBaseModel):
     num_channels: NonNegativeInt = Field(example=512)
     "Feature tensor size in the hidden space."
+    keep_batch_sharded: bool = Field(default=True)
+    "Keep the input batch and the output of the model sharded"
     model: Model = Field(default_factory=Model)
     "Model schema."
-    layer_kernels: Union[dict[str, dict], None] = Field(default_factory=dict)
-    "Settings related to custom kernels for encoder processor and decoder blocks"
     trainable_parameters: TrainableParameters = Field(default_factory=TrainableParameters)
     "Learnable node and edge parameters."
     bounding: list[Bounding]
@@ -170,17 +210,30 @@ class BaseModelSchema(PydanticBaseModel):
     "Output mask"
     latent_skip: bool = True
     "Add skip connection in latent space before/after processor. Currently only in interpolator."
-    grid_skip: Union[int, None] = 0  # !TODO set default to -1 if added to standard forecaster.
-    "Index of grid residual connection, or use none. Currently only in interpolator."
-    processor: Union[GNNProcessorSchema, GraphTransformerProcessorSchema, TransformerProcessorSchema] = Field(
+    processor: Union[
+        GNNProcessorSchema, GraphTransformerProcessorSchema, TransformerProcessorSchema, PointWiseMLPProcessorSchema
+    ] = Field(
         ...,
         discriminator="target_",
     )
     "GNN processor schema."
-    encoder: Union[GNNEncoderSchema, GraphTransformerEncoderSchema] = Field(..., discriminator="target_")
+    encoder: Union[GNNEncoderSchema, GraphTransformerEncoderSchema, TransformerEncoderSchema] = Field(
+        ...,
+        discriminator="target_",
+    )
     "GNN encoder schema."
-    decoder: Union[GNNDecoderSchema, GraphTransformerDecoderSchema] = Field(..., discriminator="target_")
-    "GNN decoder schema."
+    decoder: Union[GNNDecoderSchema, GraphTransformerDecoderSchema, TransformerDecoderSchema] = Field(
+        ...,
+        discriminator="target_",
+    )
+    "GNN decoder schema.",
+    residual: ResidualConnectionSchema = Field(
+        ...,
+        discriminator="target_",
+    )
+    "Residual connection schema."
+    compile: Optional[list[dict[str, Any]]] = Field(None)
+    "Modules to be compiled"
 
 
 class NoiseInjectorSchema(BaseModel):
@@ -194,11 +247,45 @@ class NoiseInjectorSchema(BaseModel):
     "Hidden dimension of the MLP used to process the noise."
     inject_noise: bool = Field(default=True)
     "Whether to inject noise or not."
+    layer_kernels: Union[dict[str, dict], None] = Field(default_factory=dict)
+    "Settings related to custom kernels for encoder processor and decoder blocks"
 
 
 class EnsModelSchema(BaseModelSchema):
     noise_injector: NoiseInjectorSchema = Field(default_factory=list)
     "Settings related to custom kernels for encoder processor and decoder blocks"
+    condition_on_residual: bool = Field(default=False)
+    "Whether to condition the noise injection on the residual connection."
 
 
-ModelSchema = Union[BaseModelSchema, EnsModelSchema]
+class DiffusionModelSchema(BaseModelSchema):
+    model: DiffusionModel = Field(default_factory=DiffusionModel)
+    "Diffusion Model schema"
+
+    @model_validator(mode="after")
+    def validate_no_bounding_for_diffusion(self) -> "DiffusionModelSchema":
+        if self.bounding:
+            msg = (
+                "Diffusion models do not support bounding layers. "
+                f"Found {len(self.bounding)} bounding configuration(s). "
+                "Please remove all bounding configurations for diffusion models."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class DiffusionTendModelSchema(DiffusionModelSchema):
+    condition_on_residual: bool = Field(default=False)
+    "Whether to condition the noise injection on the residual connection."
+
+
+class HierarchicalModelSchema(BaseModelSchema):
+    enable_hierarchical_level_processing: bool = Field(default=False)
+    "Toggle to do message passing at every downscaling and upscaling step"
+    level_process_num_layers: NonNegativeInt = Field(default=1)
+    "Number of message passing steps at each level"
+
+
+ModelSchema = Union[
+    BaseModelSchema, EnsModelSchema, HierarchicalModelSchema, DiffusionModelSchema, DiffusionTendModelSchema
+]
