@@ -131,8 +131,6 @@ model:
     attention_implementation: scaled_dot_product_attention
   encoder:
     _target_: anemoi.models.layers.mapper.SFNO2HEALPixForwardMapper
-  decoder:
-    graph_attention_backend: pyg
   trainable_parameters:
     data: 2
     hidden: 2
