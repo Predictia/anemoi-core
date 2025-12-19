@@ -11,11 +11,11 @@ import uuid
 from typing import Optional
 
 import torch
-from hydra.utils import instantiate
+from hydra.utils import instantiate, get_class
 from torch.distributed.distributed_c10d import ProcessGroup
 from torch_geometric.data import HeteroData
 
-from anemoi.models.preprocessing import Processors
+from anemoi.models.preprocessing import BasePreprocessor, Processors
 from anemoi.utils.config import DotDict
 
 
@@ -75,12 +75,28 @@ class AnemoiModelInterface(torch.nn.Module):
         self.supporting_arrays = supporting_arrays if supporting_arrays is not None else {}
         self.data_indices = data_indices
         self._build_model()
+    
+    def _instantiate_processor(self, processor: DotDict, tendencies: bool = False) -> BasePreprocessor:
+
+        return instantiate(
+            processor,
+            data_indices=self.data_indices,
+            statistics=(
+                self.statistics_tendencies
+                if tendencies else self.statistics
+            ),
+            **(
+                {"graph_data": self.graph_data}
+                if getattr(get_class(processor["_target_"]), "needs_graph_data", False)
+                else {}
+            )
+        )
 
     def _build_model(self) -> None:
         """Builds the model and pre- and post-processors."""
         # Instantiate processors
         processors = [
-            [name, instantiate(processor, data_indices=self.data_indices, statistics=self.statistics)]
+            [name, self._instantiate_processor(processor)]
             for name, processor in self.config.data.processors.items()
         ]
 
@@ -91,7 +107,7 @@ class AnemoiModelInterface(torch.nn.Module):
         # If tendencies statistics are provided, instantiate the tendencies processors
         if self.statistics_tendencies is not None:
             processors = [
-                [name, instantiate(processor, data_indices=self.data_indices, statistics=self.statistics_tendencies)]
+                [name, self._instantiate_processor(processor, tendencies=True)]
                 for name, processor in self.config.data.processors.items()
             ]
             # Assign the processor list pre- and post-processors
