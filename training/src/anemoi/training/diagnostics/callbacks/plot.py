@@ -76,6 +76,8 @@ class BasePlotCallback(Callback, ABC):
         self._error: BaseException = None
         self.datashader_plotting = config.diagnostics.plot.datashader
 
+        self.post_process = self.config.diagnostics.plot.get("post_process", True)
+
         if self.config.diagnostics.plot.asynchronous:
             LOGGER.info("Setting up asynchronous plotting ...")
             self.plot = self._async_plot
@@ -278,6 +280,9 @@ class BasePerBatchPlotCallback(BasePlotCallback):
                 if hasattr(post_processor, "nan_locations"):
                     post_processor.nan_locations = pl_module.allgather_batch(post_processor.nan_locations)
             self.post_processors = self.post_processors.cpu()
+
+            # Optionally, ignore post_processors
+            self.post_processors = self.post_processors if self.post_process else lambda x, **_: x
 
             output_times = self._get_output_times(self.config, pl_module)
 
