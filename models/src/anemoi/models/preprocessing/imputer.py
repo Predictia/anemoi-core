@@ -341,7 +341,7 @@ class NearestNeighbourImputer(BaseImputer):
     ) -> None:
 
         super().__init__(
-            config=config,
+            config=(config | {"default": "none"}),
             data_indices=data_indices,
             statistics=statistics,
         )
@@ -351,12 +351,11 @@ class NearestNeighbourImputer(BaseImputer):
 
         assert graph_data is not None, "Missing nodes information!"
         assert (
-            len(set(k for k in config if k != "default")) == 1,
-            "Only an unique number of neighbours is supported!",
+            len({k for k in config if k != "default"}) == 1,
+            "A single number of neighbours must be specified!",
         )
 
         x = graph_data[config.get("graph_name_data", "data")].x
-
         x = np.stack(
             (
                 np.cos(x[:, 0]) * np.cos(x[:, 1]),
@@ -366,22 +365,34 @@ class NearestNeighbourImputer(BaseImputer):
             axis=-1
         )
 
-        k = next((k for k in config if k != "default"), 1)
-        k = self.guess_best_k(x) if k == "guess" else k
+        k = next(k for k in config if k != "default")
 
-        assert isinstance(k, int), "No. of neighbours must be an integer!"
+        if isinstance(k, int):
+            k, step = k, 1
+        elif k == "guess":
+            k, step = self.guess_best_strategy(x)
+        elif (
+            isinstance(k, str)
+            and all(ss.isnumeric() for ss in k.split("x"))
+        ):
+            k_total = k.split("x")
+            k, step = int(k_total[0]), int(k_total[1])
+        else:
+            raise ValueError("This imputation strategy doesn't exist!")
 
-        self.nn_all2all = KDTree(x).query(x, [1] if max(1, k) == 1 else k)[-1]
+        k, step = max(1, k), max(1, step)
+        neighbours = list(range(1, k * step + 1, step))
+
+        self.nn_all2all = KDTree(x).query(x, neighbours)[-1]
         self.register_buffer("_saved_nanloc", torch.empty(0, dtype=torch.bool), persistent=False)
 
         self.x = x
-        self.k = max(1, k) 
         self._saved_nn_all2notnan = None
 
-    def guess_best_k(
+    def guess_best_strategy(
         self,
         x: np.ndarray,
-    ) -> int:
+    ) -> tuple[int, int]:
 
         raise NotImplementedError
 
