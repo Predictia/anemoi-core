@@ -382,8 +382,9 @@ class NearestNeighbourImputer(BaseImputer):
 
         k, step = max(1, k), max(1, step)
         neighbours = list(range(1, k * step + 1, step))
-
-        self.nn_all2all = KDTree(x).query(x, neighbours)[-1]
+        nn_all2all = KDTree(x).query(x, neighbours)[-1]
+        
+        self.register_buffer("_nn_all2all", torch.from_numpy(nn_all2all), persistent=False)
         self.register_buffer("_saved_nanloc", torch.empty(0, dtype=torch.bool), persistent=False)
 
         self.x = x
@@ -403,7 +404,7 @@ class NearestNeighbourImputer(BaseImputer):
         
         nn_all2notnan = np.stack(
             [
-                KDTree(np.where(nanloc_v[:, None], [0, 0, 3], self.x)).query(self.x)[-1]
+                KDTree(np.where(nanloc_v[:, None].cpu(), [0, 0, 3], self.x)).query(self.x)[-1]
                 for nanloc_v in nan_locations.unbind(-1)
             ],
             axis=-1
@@ -447,7 +448,7 @@ class NearestNeighbourImputer(BaseImputer):
             x[..., idx_dst] = x[..., nn_all2notnan[:, k], idx_dst]
 
             x[..., nan_locations[:, idx_src], idx_dst] = (
-                x[..., self.nn_all2all[nan_locations[:, idx_src]], idx_dst]
+                x[..., self._nn_all2all[nan_locations[:, idx_src]], idx_dst]
             ).mean(-1)
 
         return x
