@@ -14,8 +14,13 @@ from abc import ABC
 from typing import Optional
 
 import torch
+import numpy as np
+
 from omegaconf import DictConfig
 from omegaconf import OmegaConf
+
+from torch_geometric.data import HeteroData
+from scipy.spatial import KDTree
 
 from anemoi.models.data_indices.collection import IndexCollection
 from anemoi.models.preprocessing import BasePreprocessor
@@ -321,6 +326,132 @@ class ConstantImputer(BaseImputer):
         self._create_imputation_indices()
 
         self._validate_indices()
+
+
+class NearestNeighbourImputer(BaseImputer):
+
+    needs_graph_data = True
+
+    def __init__(
+        self,
+        config: Optional[DictConfig] = None,
+        data_indices: Optional[IndexCollection] = None,
+        statistics: Optional[dict] = None,
+        graph_data: Optional[HeteroData] = None,
+    ) -> None:
+
+        super().__init__(
+            config=(config | {"default": "none"}),
+            data_indices=data_indices,
+            statistics=statistics,
+        )
+
+        self._create_imputation_indices()
+        self._validate_indices()
+
+        assert graph_data is not None, "Missing nodes information!"
+        assert (
+            len({k for k in config if k != "default"}) == 1,
+            "A single number of neighbours must be specified!",
+        )
+
+        x = graph_data[config.get("graph_name_data", "data")].x
+        x = np.stack(
+            (
+                np.cos(x[:, 0]) * np.cos(x[:, 1]),
+                np.cos(x[:, 0]) * np.sin(x[:, 1]),
+                np.sin(x[:, 0]),
+            ),
+            axis=-1
+        )
+
+        k = next(k for k in config if k != "default")
+
+        if isinstance(k, int):
+            k, step = k, 1
+        elif k == "guess":
+            k, step = self.guess_best_strategy(x)
+        elif (
+            isinstance(k, str)
+            and all(ss.isnumeric() for ss in k.split("x"))
+        ):
+            k_total = k.split("x")
+            k, step = int(k_total[0]), int(k_total[1])
+        else:
+            raise ValueError("This imputation strategy doesn't exist!")
+
+        k, step = max(1, k), max(1, step)
+        neighbours = list(range(1, k * step + 1, step))
+        nn_all2all = KDTree(x).query(x, neighbours)[-1]
+        
+        self.register_buffer("_nn_all2all", torch.from_numpy(nn_all2all), persistent=False)
+        self.register_buffer("_saved_nanloc", torch.empty(0, dtype=torch.bool), persistent=False)
+
+        self.x = x
+        self._saved_nn_all2notnan = None
+
+    def guess_best_strategy(
+        self,
+        x: np.ndarray,
+    ) -> tuple[int, int]:
+
+        raise NotImplementedError
+
+    def get_new_nn_all2notnan(
+        self,
+        nan_locations: torch.Tensor,
+    ) -> np.ndarray:
+        
+        nn_all2notnan = np.stack(
+            [
+                KDTree(np.where(nanloc_v[:, None].cpu(), [0, 0, 3], self.x)).query(self.x)[-1]
+                for nanloc_v in nan_locations.unbind(-1)
+            ],
+            axis=-1
+        )
+
+        self._saved_nn_all2notnan = nn_all2notnan
+        self._saved_nanloc = nan_locations
+
+        return self._saved_nn_all2notnan
+
+    def get_nn_all2notnan(
+        self,
+        nan_locations: torch.Tensor,
+    ) -> np.ndarray:
+
+        return (
+            self._saved_nn_all2notnan
+            if torch.equal(nan_locations, self._saved_nanloc)
+            else self.get_new_nn_all2notnan(nan_locations)
+        )
+
+    def fill_with_value(
+        self,
+        x: torch.Tensor,
+        index_x: list[int],
+        nan_locations: torch.Tensor,
+        index_nl: list[int],
+    ) -> torch.Tensor:
+        
+        idx = [
+            (idx_src, idx_dst)
+            for idx_src, idx_dst in zip(index_nl, index_x)
+            if idx_src is not None and idx_dst is not None
+        ]
+
+        nan_locations = nan_locations[*((0,) * (nan_locations.ndim - 2)), :, :]
+        nn_all2notnan = self.get_nn_all2notnan(nan_locations[:, [i for i, _ in idx]])
+
+        for k, (idx_src, idx_dst) in enumerate(idx):
+
+            x[..., idx_dst] = x[..., nn_all2notnan[:, k], idx_dst]
+
+            x[..., nan_locations[:, idx_src], idx_dst] = (
+                x[..., self._nn_all2all[nan_locations[:, idx_src]], idx_dst]
+            ).mean(-1)
+
+        return x
 
 
 class CopyImputer(BaseImputer):
