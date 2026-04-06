@@ -78,6 +78,9 @@ class BaseGraphModel(nn.Module):
         # the model only returns the residual's output, ignoring the "delta" component
         self.residual_only_mode = getattr(model_config.model, "residual_only_mode", False)
 
+        # instance normalization: subtract spatial mean of prognostic variables from model input
+        self.instance_norm = getattr(model_config.model, "instance_norm", False)
+
         # build residual connection x(t+1) = model(x(t)) + residual(x(t))
         if "Connection" in model_config.model.residual._target_:
             self.residual_connection = instantiate(
@@ -101,6 +104,14 @@ class BaseGraphModel(nn.Module):
             lons=self._graph_data[self._graph_name_data].x[:, 1],
             vars_idx=data_indices.model.input.prognostic,
         )
+
+        # Optional forcing conditioning (e.g. forcing-conditioned layer norm)
+        forcing_embedder_config = getattr(model_config.model, "forcing_embedder", None)
+        if forcing_embedder_config is not None:
+            self.forcing_embedder = instantiate(
+                forcing_embedder_config,
+                variables=data_indices.model.input.name_to_index,
+            )
 
         # build boundings
         self.boundings = build_boundings(model_config, self.data_indices, self.statistics)

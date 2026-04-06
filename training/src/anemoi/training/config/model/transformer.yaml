@@ -1,5 +1,6 @@
 num_channels: 1024
 cpu_offload: False
+instance_norm: False
 
 keep_batch_sharded: True
 

@@ -168,25 +168,61 @@ class AnemoiModelEncProcDec(BaseGraphModel):
         Tensor
             Output of the model, with the same shape as the input (sharded if input is sharded)
         """
+        
         batch_size = x.shape[0]
         ensemble_size = x.shape[2]
         in_out_sharded = grid_shard_shapes is not None
         self._assert_valid_sharding(batch_size, ensemble_size, in_out_sharded, model_comm_group)
-
-        x_data_latent, shard_shapes_data = self._assemble_input(x, batch_size, grid_shard_shapes, model_comm_group)
+        
+        if self.instance_norm:
+            x_model = x.clone()
+            x_prog = x_model[..., self._internal_input_idx]
+            x_model[..., self._internal_input_idx] = x_prog - x_prog.mean(dim=-2, keepdim=True)
+        else:
+            x_model = x
 
         x_hidden_latent = self.node_attributes(self._graph_name_hidden, batch_size=batch_size)
         shard_shapes_hidden = get_shard_shapes(x_hidden_latent, 0, model_comm_group)
 
+        fwd_mapper_kwargs = {}
+        processor_kwargs = {}
+        bwd_mapper_kwargs = {}
+
+        if hasattr(self, "forcing_embedder"):
+            forcing_cond = self.forcing_embedder(x)
+
+            # Expand forcing conditioning from batch-level to node-level tensors.
+            c_data = einops.repeat(
+                forcing_cond,
+                "batch cond -> (batch repeat) cond",
+                repeat=self.node_attributes.num_nodes[self._graph_name_data],
+            )
+            c_hidden = einops.repeat(
+                forcing_cond,
+                "batch cond -> (batch repeat) cond",
+                repeat=self.node_attributes.num_nodes[self._graph_name_hidden],
+            )
+
+            c_data_shapes = get_shard_shapes(c_data, 0, model_comm_group)
+            c_hidden_shapes = get_shard_shapes(c_hidden, 0, model_comm_group)
+            c_data = shard_tensor(c_data, 0, c_data_shapes, model_comm_group)
+            c_hidden = shard_tensor(c_hidden, 0, c_hidden_shapes, model_comm_group)
+
+            fwd_mapper_kwargs["cond"] = (c_data, c_hidden)
+            processor_kwargs["cond"] = c_hidden
+            bwd_mapper_kwargs["cond"] = (c_hidden, c_data)
+
+        x_data_latent, shard_shapes_data = self._assemble_input(x_model, batch_size, grid_shard_shapes, model_comm_group)
+
         # Residual
         if hasattr(self, "residual_connection"):
             x_skip = self.residual_connection(
-                x,
+                x_model,
                 grid_shard_shapes=grid_shard_shapes,
                 model_comm_group=model_comm_group,
             )[..., self._internal_input_idx]
         elif hasattr(self, "learnable_residual"):
-            x_skip = self.learnable_residual(x[:, -1, ...])
+            x_skip = self.learnable_residual(x_model[:, -1, ...])
 
         if self.residual_only_mode:
             return self._residual_only_mode(x_skip, batch_size, ensemble_size)
@@ -200,6 +236,7 @@ class AnemoiModelEncProcDec(BaseGraphModel):
             x_src_is_sharded=in_out_sharded,  # x_data_latent comes sharded iff in_out_sharded
             x_dst_is_sharded=False,  # x_latent does not come sharded
             keep_x_dst_sharded=True,  # always keep x_latent sharded for the processor
+            **fwd_mapper_kwargs,
         )
 
         # Processor
@@ -208,6 +245,7 @@ class AnemoiModelEncProcDec(BaseGraphModel):
             batch_size=batch_size,
             shard_shapes=shard_shapes_hidden,
             model_comm_group=model_comm_group,
+            **processor_kwargs,
         )
 
         # Skip
@@ -226,6 +264,7 @@ class AnemoiModelEncProcDec(BaseGraphModel):
             x_src_is_sharded=True,  # x_latent always comes sharded
             x_dst_is_sharded=in_out_sharded,  # x_data_latent comes sharded iff in_out_sharded
             keep_x_dst_sharded=in_out_sharded,  # keep x_out sharded iff in_out_sharded
+            **bwd_mapper_kwargs,
         )
 
         x_out = self._assemble_output(x_out, x_skip, batch_size, ensemble_size, x.dtype)
