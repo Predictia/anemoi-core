@@ -25,6 +25,7 @@ from anemoi.training.diagnostics.callbacks.checkpoint import AnemoiCheckpoint
 from anemoi.training.diagnostics.callbacks.optimiser import LearningRateMonitor
 from anemoi.training.diagnostics.callbacks.provenance import ParentUUIDCallback
 from anemoi.training.diagnostics.callbacks.sanity import CheckVariableOrder
+from anemoi.training.diagnostics.callbacks.weight_averaging import _get_weight_averaging_callback
 from anemoi.training.schemas.base_schema import BaseSchema
 from anemoi.training.utils.checkpoint import RegisterMigrations
 

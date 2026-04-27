@@ -585,6 +585,23 @@ averaging methods through PyTorch Lightning callbacks:
 
       .. code:: yaml
 
+Note that both entries are optional and can be left unspecified. The default precision is ``f16-mixed`` while the BLAS backend will fall back to the
+default selection of PyTorch.
+
+******************
+ Weight Averaging
+******************
+
+Weight averaging is a technique to improve model generalization by
+averaging model weights during training. Anemoi Training supports weight
+averaging methods through PyTorch Lightning callbacks:
+
+-  **Exponential Moving Average (EMA)**: Maintains an exponential moving
+      average of model weights, which can lead to smoother convergence
+      and better generalization.
+
+      .. code:: yaml
+
          weight_averaging:
             _target_: pytorch_lightning.callbacks.EMAWeightAveraging
             decay: 0.999
