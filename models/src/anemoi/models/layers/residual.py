@@ -110,6 +110,7 @@ class BasicOrnsteinResidual(Module):
         theta_buff: float = 0.00,
         zmean_term: bool = True,
         regressors: list[str] = [],
+        reg_vs_var: dict[str: list[str]] = {},
         input_idx: list[int] = [],
         variables: dict[str, int] = {},
         statistics: dict[str, np.ndarray] = {},
@@ -140,8 +141,13 @@ class BasicOrnsteinResidual(Module):
         self._regressors_input_idx = [variables[f] for f in regressors]
         self._internal_input_idx = input_idx
 
-        muzero = torch.ones_like(weight)
-        muzero[1, :, :, :, :] = 1.0 if zmean_term else 0.0
+        muzero = torch.ones_like(weight[:, :, 0, 0, 0])
+        muzero[1, :] = 1.0 if zmean_term else 0.0
+
+        for reg, vars in reg_vs_var.items():
+            vars_idx = [variables[var] for var in vars]
+            zero_idx = [n for n, idx in enumerate(input_idx) if idx not in vars_idx]
+            muzero[regressors.index(reg) + 2, zero_idx] = 0.0
 
         self.register_buffer("muzero", muzero)
         self.theta_buff = theta_buff
@@ -167,8 +173,9 @@ class BasicOrnsteinResidual(Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
-        weight = self.isht(torch.view_as_complex(self.weight * self.muzero))
+        weight = self.isht(torch.view_as_complex(self.weight))
         weight = einops.rearrange(weight, self.values_reshape_inv)
+        weight = weight * self.muzero[:, None, :]
 
         return (
             + (1 - torch.sigmoid(weight[0, ...]) * (1 - self.theta_buff) - self.theta_buff)
@@ -194,6 +201,7 @@ class CompleteOrnsteinResidual(BasicOrnsteinResidual):
         theta_buff: float = 0.00,
         zmean_term: bool = True,
         regressors: list[str] = [],
+        reg_vs_var: dict[str: list[str]] = {},
         anti_aliasing: bool = True,
         skip_blur: list[str] = [],
         input_idx: list[int] = [],
@@ -211,6 +219,7 @@ class CompleteOrnsteinResidual(BasicOrnsteinResidual):
             theta_buff=theta_buff,
             zmean_term=zmean_term,
             regressors=regressors,
+            reg_vs_var=reg_vs_var,
             input_idx=input_idx,
             variables=variables,
             statistics=statistics,
