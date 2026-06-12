@@ -198,6 +198,7 @@ class EMAWeightAveraging(WeightAveraging):
         use_buffers: bool = True,
         decay: float = 0.999,
         update_every_n_steps: int = 1,
+        switch_every_n_steps: int | None = None,
         update_starting_at_step: int | None = None,
         update_starting_at_epoch: int | None = None,
         **kwargs: Any,
@@ -208,9 +209,36 @@ class EMAWeightAveraging(WeightAveraging):
             **kwargs,
             avg_fn=get_ema_avg_fn(decay=decay),
         )
+        self.switch_every_n_steps = switch_every_n_steps
         self.update_every_n_steps = update_every_n_steps
         self.update_starting_at_step = update_starting_at_step
         self.update_starting_at_epoch = update_starting_at_epoch
+
+    def on_train_batch_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", outputs: STEP_OUTPUT, batch: Any, batch_idx: int
+    ) -> None:
+        """Called when a training batch ends.
+
+        Updates the :class:`AveragedModel` parameters, if requested by ``self.should_update()``.
+
+        Args:
+            trainer: The current :class:`~pytorch_lightning.trainer.trainer.Trainer` instance.
+            pl_module: The current :class:`~pytorch_lightning.core.LightningModule` instance.
+            outputs: Outputs from the training batch.
+            batch: The training batch.
+            batch_idx: Index of the training batch.
+
+        """
+        # trainer.global_step is the number of optimizer steps taken so far, i.e. 1 after the first optimizer step. To
+        # make step_idx consistent with epoch_idx, we'll pass a zero-based index.
+        step_idx = trainer.global_step - 1
+        if (trainer.global_step > self._latest_update_step):
+            assert self._average_model is not None
+            if self.should_update(step_idx=step_idx):
+                self._average_model.update_parameters(pl_module)
+                self._latest_update_step = trainer.global_step
+            if self.switch_every_n_steps and step_idx % self.switch_every_n_steps == 0:
+                self._copy_average_to_current(pl_module)
 
 
 class SWAWeightAveraging(WeightAveraging):
