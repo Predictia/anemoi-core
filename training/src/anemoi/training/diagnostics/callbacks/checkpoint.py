@@ -52,7 +52,14 @@ class AnemoiCheckpoint(ModelCheckpoint):
     def _torch_drop_down(trainer: pl.Trainer) -> torch.nn.Module:
         # Get the model from the DataParallel wrapper, for single and multi-gpu cases
         assert hasattr(trainer, "model"), "Trainer has no attribute 'model'! Is the Pytorch Lightning version correct?"
-        return trainer.model.module.model if hasattr(trainer.model, "module") else trainer.model.model
+        # Look for WeightAveraging callback and target "Phantom" model instead
+        model = next(
+            (
+                cb._average_model for cb in trainer.callbacks
+                if "WeightAveraging" in type(cb).__name__
+            ), trainer.model
+        )
+        return model.module.model if hasattr(model, "module") else model.model
 
     @rank_zero_only
     def model_metadata(self, model: torch.nn.Module) -> dict:
