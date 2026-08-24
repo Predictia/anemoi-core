@@ -11,12 +11,12 @@ import uuid
 from typing import Optional
 
 import torch
-from hydra.utils import instantiate
+from hydra.utils import instantiate, get_class
 from omegaconf import DictConfig
 from torch.distributed.distributed_c10d import ProcessGroup
 from torch_geometric.data import HeteroData
 
-from anemoi.models.preprocessing import Processors
+from anemoi.models.preprocessing import BasePreprocessor, Processors
 from anemoi.models.preprocessing import StepwiseProcessors
 from anemoi.models.utils.config import get_multiple_datasets_config
 
@@ -85,6 +85,7 @@ class AnemoiModelInterface(torch.nn.Module):
     def _build_processors_for_dataset(
         self,
         processors_configs: dict,
+        graph_data: HeteroData,
         statistics: dict,
         data_indices: dict,
         statistics_tendencies: dict | None = None,
@@ -116,6 +117,7 @@ class AnemoiModelInterface(torch.nn.Module):
             processors_configs,
             data_indices,
             statistics,
+            graph_data,
         )
         pre_processors_tendencies, post_processors_tendencies = self._build_tendency_processors(
             processors_configs,
@@ -129,9 +131,26 @@ class AnemoiModelInterface(torch.nn.Module):
         processors_configs: dict,
         data_indices: dict,
         statistics: dict,
+        graph_data: HeteroData | None = None,
     ) -> tuple[Processors, Processors]:
+        processors_kwargs = {
+            name: (
+                {"graph_data": graph_data}
+                if getattr(get_class(processor["_target_"]), "needs_graph_data", False)
+                else {}
+            )
+            for name, processor in processors_configs.items()
+        }
         processors = [
-            [name, instantiate(processor, data_indices=data_indices, statistics=statistics)]
+            [
+                name,
+                instantiate(
+                    processor,
+                    data_indices=data_indices,
+                    statistics=statistics,
+                    **processors_kwargs[name],
+                )
+            ]
             for name, processor in processors_configs.items()
         ]
         return Processors(processors), Processors(processors, inverse=True)
@@ -178,6 +197,7 @@ class AnemoiModelInterface(torch.nn.Module):
             # Build processors for each dataset
             pre, post, pre_tend, post_tend = self._build_processors_for_dataset(
                 data_config[dataset_name].processors,
+                self.graph_data[dataset_name],
                 self.statistics[dataset_name],
                 self.data_indices[dataset_name],
                 self.statistics_tendencies[dataset_name] if self.statistics_tendencies is not None else None,
