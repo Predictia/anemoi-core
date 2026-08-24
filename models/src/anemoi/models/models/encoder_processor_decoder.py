@@ -38,6 +38,7 @@ class AnemoiModelEncProcDec(BaseGraphModel):
         # Encoder data -> hidden
         self.encoder_graph_provider = torch.nn.ModuleDict()
         self.encoder = torch.nn.ModuleDict()
+        self.exciter = torch.nn.ModuleDict()
         for dataset_name in self.dataset_names:
             # Create graph providers
             self.encoder_graph_provider[dataset_name] = create_graph_provider(
@@ -55,6 +56,13 @@ class AnemoiModelEncProcDec(BaseGraphModel):
                 in_channels_dst=self.input_dim_latent,
                 hidden_dim=self.num_channels,
                 edge_dim=self.encoder_graph_provider[dataset_name].edge_dim,
+            )
+
+            self.exciter[dataset_name] = instantiate(
+                model_config.model.exciter,
+                lats=self._graph_data[dataset_name].x[:, 0],
+                lons=self._graph_data[dataset_name].x[:, 1],
+                vars_idx=self._internal_input_idx[dataset_name],
             )
 
         # Processor hidden -> hidden
@@ -116,6 +124,9 @@ class AnemoiModelEncProcDec(BaseGraphModel):
 
         if grid_shard_sizes is not None:
             node_attributes_data = shard_tensor(node_attributes_data, 0, grid_shard_sizes, model_comm_group)
+        
+        # noise injection with exciter
+        x = self.exciter[dataset_name](x)
 
         # normalize and add data positional info (lat/lon)
         x_data_latent = torch.cat(
