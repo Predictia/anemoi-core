@@ -89,8 +89,12 @@ class BaseGraphModel(nn.Module):
         self._build_networks(model_config)
 
         # build residual connection
-        self._build_residual(model_config.model.residual, model_config.model.get("sparse_projector", {}))
-
+        self.residual_only_mode = getattr(model_config.model, "residual_only_mode", False)
+        if "residual_de393" in model_config.model.residual._target_:
+            self._build_residual_de393(model_config.model.residual)
+        else:
+            self._build_residual(model_config.model.residual, model_config.model.get("sparse_projector", {}))
+        
         # build boundings
         # Instantiation of model output bounding functions (e.g., to ensure outputs like TP are positive definite)
         # Multi-dataset: create ModuleDict with ModuleList per dataset
@@ -255,6 +259,31 @@ class BaseGraphModel(nn.Module):
                 data_indices=self.data_indices[dataset_name],
                 dataset_name=dataset_name,
                 sparse_projector_num_chunks=sparse_projector_num_chunks,
+            )
+
+    def _build_residual_de393(self, residual_config: DotDict) -> None:
+        self.uses_de393_residual = True
+        self.residual = torch.nn.ModuleDict()
+        for dataset_name in self.dataset_names:
+            statistics = {
+                s: v[self._internal_input_idx[dataset_name]]
+                for s, v in self.statistics[dataset_name].items()
+            }
+            residual_config = {
+                key: val
+                for key, val in residual_config if key != "step"
+            }
+            lat, lon = (
+                self._graph_data[dataset_name].x[:, 0],
+                self._graph_data[dataset_name].x[:, 1]
+            )
+            self.residual[dataset_name] = instantiate(
+                residual_config,
+                statistics=statistics,
+                nlat=len(torch.unique(lat)),
+                nlon=len(torch.unique(lon)),
+                input_idx=self._internal_input_idx[dataset_name],
+                variables=self.data_indices[dataset_name].model.input.name_to_index,
             )
 
     def _build_named_node_attributes_graph(self) -> HeteroData:

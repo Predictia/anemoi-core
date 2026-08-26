@@ -207,7 +207,13 @@ class BaseAnemoiReader:
     @property
     def statistics(self) -> dict:
         """Return dataset statistics."""
-        return self.data.statistics
+        stats = self.data.statistics
+
+        try: tends = self.data.statistics_tendencies() or {}
+        except: tends = {}
+        
+        tends = {k + "_tend": v for k, v in tends.items()}
+        return stats | tends
 
     def statistics_tendencies(
         self,

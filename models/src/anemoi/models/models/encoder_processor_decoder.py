@@ -115,12 +115,15 @@ class AnemoiModelEncProcDec(BaseGraphModel):
         node_attributes_data = self.node_attributes(dataset_name, batch_size=batch_size)
         grid_shard_sizes = grid_shard_sizes[dataset_name] if grid_shard_sizes is not None else None
 
-        x_skip = self.residual[dataset_name](
-            x,
-            grid_shard_sizes=grid_shard_sizes,
-            model_comm_group=model_comm_group,
-            n_step_output=self.n_step_output,
-        )
+        if getattr(self, "uses_de393_residual", False):
+            x_skip = self.residual[dataset_name](x[:, -1, ...])
+        else:
+            x_skip = self.residual[dataset_name](
+                x,
+                grid_shard_sizes=grid_shard_sizes,
+                model_comm_group=model_comm_group,
+                n_step_output=self.n_step_output,
+            )
 
         if grid_shard_sizes is not None:
             node_attributes_data = shard_tensor(node_attributes_data, 0, grid_shard_sizes, model_comm_group)
@@ -161,12 +164,12 @@ class AnemoiModelEncProcDec(BaseGraphModel):
         )
 
         # residual connection (just for the prognostic variables)
-        assert dataset_name is not None, "dataset_name must be provided for multi-dataset case"
-        assert x_skip.ndim == 5, "Residual must be (batch, time, ensemble, grid, vars)."
-        assert (
-            x_skip.shape[1] == x_out.shape[1]
-        ), f"Residual time dimension ({x_skip.shape[1]}) must match output time dimension ({x_out.shape[1]})."
-        x_out[..., self._internal_output_idx[dataset_name]] += x_skip[..., self._internal_input_idx[dataset_name]]
+        if getattr(self, "uses_de393_residual", False):
+            x_out[..., self._internal_output_idx[dataset_name]] += x_skip[:, None, ...]
+        else:
+            x_out[..., self._internal_output_idx[dataset_name]] += (
+                x_skip[..., self._internal_input_idx[dataset_name]]
+            )
 
         for bounding in self.boundings[dataset_name]:
             # bounding performed in the order specified in the config file
