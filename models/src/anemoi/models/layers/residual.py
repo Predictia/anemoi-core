@@ -246,7 +246,9 @@ class SimpleOrnsteinResidual(Module):
         theta_init: float = 0.00,
         theta_buff: float = 0.00,
         theta_train: bool = True,
+        regressors: list[str] = [],
         input_idx: list[int] = [],
+        variables:  dict[str, int] = {},
         statistics: dict[str, np.ndarray] = {},
         **_
     ) -> None:
@@ -257,12 +259,14 @@ class SimpleOrnsteinResidual(Module):
         theta_init = np.log(theta_init / (1 - theta_init))
         theta_init = np.array(theta_init)
 
-        weight = torch.zeros(len(input_idx))
-        weight[:] = torch.from_numpy(theta_init)
+        weight = torch.zeros(len(regressors) + 2, len(input_idx))
+        weight[0, :] = torch.from_numpy(theta_init)
+
+        self._regressors_input_idx = [variables[f] for f in regressors]
+        self._internal_input_idx = input_idx
 
         self.weight = Parameter(weight, theta_train)
         self.theta_buff = theta_buff
-        self._internal_input_idx = input_idx
 
     def init_theta(
         self,
@@ -285,9 +289,16 @@ class SimpleOrnsteinResidual(Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
+        weight = self.weight
+
         return (
-            + (1 - torch.sigmoid(self.weight) * (1 - self.theta_buff) - self.theta_buff)
+            + (1 - torch.sigmoid(weight[0, ...]) * (1 - self.theta_buff) - self.theta_buff)
             * x[..., self._internal_input_idx]
+            + weight[1, ...]
+            + sum(
+                weight[i + 2, ...] * x[..., k].unsqueeze(-1)
+                for i, k in enumerate(self._regressors_input_idx)
+            )
         )
 
 
@@ -334,8 +345,8 @@ class BasicOrnsteinResidual(Module):
         self._regressors_input_idx = [variables[f] for f in regressors]
         self._internal_input_idx = input_idx
 
-        muzero = torch.ones_like(weight)
-        muzero[1, :, :, :, :] = 1.0 if zmean_term else 0.0
+        muzero = torch.ones_like(weight[:, :, 0, 0, 0])
+        muzero[1, :] = 1.0 if zmean_term else 0.0
 
         self.register_buffer("muzero", muzero)
         self.theta_buff = theta_buff
@@ -361,8 +372,9 @@ class BasicOrnsteinResidual(Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
-        weight = self.isht(torch.view_as_complex(self.weight * self.muzero))
+        weight = self.isht(torch.view_as_complex(self.weight))
         weight = einops.rearrange(weight, self.values_reshape_inv)
+        weight = weight * self.muzero[:, None, :]
 
         return (
             + (1 - torch.sigmoid(weight[0, ...]) * (1 - self.theta_buff) - self.theta_buff)
