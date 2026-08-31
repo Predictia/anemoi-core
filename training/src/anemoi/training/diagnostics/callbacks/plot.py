@@ -1051,7 +1051,8 @@ class PlotSample(BasePlotAdditionalMetrics):
         colormaps: dict[str, Colormap] | None = None,
         per_sample: int = 6,
         every_n_batches: int | None = None,
-        **kwargs: Any,
+        latlon_range: list[int] | None = None,
+        **_,
     ) -> None:
         """Initialise the PlotSample callback.
 
@@ -1073,8 +1074,9 @@ class PlotSample(BasePlotAdditionalMetrics):
             Number of plots per sample, by default 6
         every_n_batches : int, optional
             Batch frequency to plot at, by default None
+        latlon_range : list[int], optional
+            Coords range to filter (minlat, maxlat, minlon, maxlon)
         """
-        del kwargs
         super().__init__(config, every_n_batches=every_n_batches)
         self.sample_idx = sample_idx
         self.parameters = parameters
@@ -1083,11 +1085,38 @@ class PlotSample(BasePlotAdditionalMetrics):
         self.accumulation_levels_plot = accumulation_levels_plot
         self.per_sample = per_sample
         self.colormaps = colormaps
+        self.latlon_range = latlon_range
+
+        assert (
+            self.latlon_range is None
+            or (
+                len(self.latlon_range) == 4
+                and all(isinstance(c, (int, float)) for c in self.latlon_range)
+            )
+        ), "The coords-range filter is wrong."
 
         LOGGER.info(
             "Using defined accumulation colormap for fields: %s",
             self.precip_and_related_fields,
         )
+
+    def filter_latlon(self, x: np.ndarray) -> np.ndarray:
+
+        if (self.latlon_range is None) or (self.latlons is None): return x
+
+        lats, lons = self.latlons[..., 0], self.latlons[..., 1] % 360
+        min_lat, max_lat = self.latlon_range[:2]
+        min_lon, max_lon = (a % 360 for a in self.latlon_range[2:])
+
+        valid_lats = (min_lat < lats) & (lats < max_lat)
+
+        valid_lons = (
+            (min_lon < lons) & (lons < max_lon)
+            if (min_lon < max_lon) else
+            (min_lon < lons) | (lons < max_lon)
+        )
+
+        return x[valid_lats & valid_lons]
 
     @rank_zero_only
     def _plot(
@@ -1103,18 +1132,28 @@ class PlotSample(BasePlotAdditionalMetrics):
         logger = trainer.logger
 
         # Build dictionary of indices and parameters to be plotted
-        diagnostics = [] if self.config.data.diagnostic is None else self.config.data.diagnostic
+        diagnostics = (
+            []
+            if self.config.data.diagnostic is None
+            else self.config.data.diagnostic
+        )
+        name_to_index = (
+            pl_module
+            .data_indices.model
+            .output.name_to_index
+        )
         plot_parameters_dict = {
-            pl_module.data_indices.model.output.name_to_index[name]: (
-                name,
-                name not in diagnostics,
-            )
+            name_to_index[name]: (name, name not in diagnostics)
             for name in self.parameters
         }
 
         data, output_tensor = self.process(pl_module, outputs, batch, output_times)
 
         local_rank = pl_module.local_rank
+        str_latlon_range = (
+            "FullGlobe" if self.latlon_range is None
+            else "AOI-" + "-".join([str(r).replace("-", "m") for r in self.latlon_range])
+        )
 
         for rollout_step in range(output_times[0]):
             init_step = self._get_init_step(rollout_step, output_times[1])
@@ -1122,11 +1161,11 @@ class PlotSample(BasePlotAdditionalMetrics):
             fig = plot_predicted_multilevel_flat_sample(
                 plot_parameters_dict,
                 self.per_sample,
-                self.latlons,
+                self.filter_latlon(self.latlons),
                 self.accumulation_levels_plot,
-                data[init_step, ...].squeeze(),
-                data[rollout_step + 1, ...].squeeze(),
-                output_tensor[rollout_step, ...],
+                self.filter_latlon(data[init_step, ...].squeeze()),
+                self.filter_latlon(data[rollout_step + 1, ...].squeeze()),
+                self.filter_latlon(output_tensor[rollout_step, ...].squeeze()),
                 datashader=self.datashader_plotting,
                 precip_and_related_fields=self.precip_and_related_fields,
                 colormaps=self.colormaps,
@@ -1136,8 +1175,8 @@ class PlotSample(BasePlotAdditionalMetrics):
                 logger,
                 fig,
                 epoch=epoch,
-                tag=f"pred_val_sample_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank{local_rank:01d}",
-                exp_log_tag=f"val_pred_sample_rstep{rollout_step:02d}_rank{local_rank:01d}",
+                tag=f"pred_val_sample_rstep{rollout_step:02d}_batch{batch_idx:04d}_rank{local_rank:01d}_{str_latlon_range}",
+                exp_log_tag=f"val_pred_sample_rstep{rollout_step:02d}_rank{local_rank:01d}_{str_latlon_range}",
             )
 
 
