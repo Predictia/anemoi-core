@@ -13,7 +13,7 @@ import torch
 import einops
 
 from torch.nn import Parameter, Module
-from models.src.anemoi.models.layers.spectral_de393 import (
+from anemoi.models.layers.spectral_de393 import (
     CartesianRealSHT,
     CartesianInverseRealSHT,
     OctahedralRealSHT,

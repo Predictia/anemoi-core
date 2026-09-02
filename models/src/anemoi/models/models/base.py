@@ -266,12 +266,12 @@ class BaseGraphModel(nn.Module):
         self.residual = torch.nn.ModuleDict()
         for dataset_name in self.dataset_names:
             statistics = {
-                s: v[self._internal_input_idx[dataset_name]]
-                for s, v in self.statistics[dataset_name].items()
+                s: v[self._internal_input_idx[dataset_name]] for s, v
+                in self.statistics[dataset_name].items()
             }
             residual_config = {
-                key: val
-                for key, val in residual_config if key != "step"
+                key: val for key, val
+                in residual_config.items() if key != "step"
             }
             lat, lon = (
                 self._graph_data[dataset_name].x[:, 0],

@@ -357,7 +357,7 @@ class NearestNeighbourImputer(BaseImputer):
     ) -> None:
 
         super().__init__(
-            config=(config | {"default": "none"}),
+            config=OmegaConf.merge(config, {"default": "none"}),
             data_indices=data_indices,
             statistics=statistics,
         )
@@ -365,13 +365,14 @@ class NearestNeighbourImputer(BaseImputer):
         self._create_imputation_indices()
         self._validate_indices()
 
-        assert graph_data is not None, "Missing nodes information!"
-        assert (
-            len({k for k in config if k != "default"}) == 1,
-            "A single number of neighbours must be specified!",
+        assert graph_data is not None and hasattr(graph_data, "x"), (
+            "Missing nodes information!"
+        )
+        assert len({k for k in config if k != "default"}) == 1, (
+            "A single number of neighbours must be specified!"
         )
 
-        x = graph_data[config.get("graph_name_data", "data")].x
+        x = graph_data.x
         x = np.stack(
             (
                 np.cos(x[:, 0]) * np.cos(x[:, 1]),
@@ -382,6 +383,7 @@ class NearestNeighbourImputer(BaseImputer):
         )
 
         k = next(k for k in config if k != "default")
+        n = next(len(v) for k, v in config.items() if k != "default")
 
         if isinstance(k, int):
             k, step = k, 1
@@ -401,7 +403,7 @@ class NearestNeighbourImputer(BaseImputer):
         nn_all2all = KDTree(x).query(x, neighbours)[-1]
         
         self.register_buffer("_nn_all2all", torch.from_numpy(nn_all2all), persistent=False)
-        self.register_buffer("_saved_nanloc", torch.empty(0, dtype=torch.bool), persistent=False)
+        self.register_buffer("_saved_nanloc", torch.zeros(len(x), n, dtype=bool), persistent=False)
 
         self.x = x
         self._saved_nn_all2notnan = None

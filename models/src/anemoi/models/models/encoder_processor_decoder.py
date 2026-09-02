@@ -129,7 +129,7 @@ class AnemoiModelEncProcDec(BaseGraphModel):
             node_attributes_data = shard_tensor(node_attributes_data, 0, grid_shard_sizes, model_comm_group)
         
         # noise injection with exciter
-        x = self.exciter[dataset_name](x)
+        x = self.exciter[dataset_name](x.clone())
 
         # normalize and add data positional info (lat/lon)
         x_data_latent = torch.cat(

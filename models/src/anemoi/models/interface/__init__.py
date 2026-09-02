@@ -123,6 +123,7 @@ class AnemoiModelInterface(torch.nn.Module):
             processors_configs,
             data_indices,
             statistics_tendencies,
+            graph_data,
         )
         return pre_processors, post_processors, pre_processors_tendencies, post_processors_tendencies
 
@@ -131,28 +132,25 @@ class AnemoiModelInterface(torch.nn.Module):
         processors_configs: dict,
         data_indices: dict,
         statistics: dict,
-        graph_data: HeteroData | None = None,
+        graph_data: HeteroData,
     ) -> tuple[Processors, Processors]:
-        processors_kwargs = {
-            name: (
-                {"graph_data": graph_data}
-                if getattr(get_class(processor["_target_"]), "needs_graph_data", False)
-                else {}
-            )
-            for name, processor in processors_configs.items()
-        }
-        processors = [
-            [
-                name,
-                instantiate(
+        processors = []
+        for name, processor in processors_configs.items():
+            processor_class = get_class(processor["_target_"])
+            if getattr(processor_class, "needs_graph_data", False):
+                processor = instantiate(
                     processor,
                     data_indices=data_indices,
                     statistics=statistics,
-                    **processors_kwargs[name],
+                    graph_data=graph_data,
                 )
-            ]
-            for name, processor in processors_configs.items()
-        ]
+            else:
+                processor = instantiate(
+                    processor,
+                    data_indices=data_indices,
+                    statistics=statistics,
+                )
+            processors.append([name, processor])
         return Processors(processors), Processors(processors, inverse=True)
 
     def _build_tendency_processors(
@@ -160,18 +158,29 @@ class AnemoiModelInterface(torch.nn.Module):
         processors_configs: dict,
         data_indices: dict,
         statistics_tendencies: dict | None,
+        graph_data: HeteroData,
     ) -> tuple[Processors | StepwiseProcessors | None, Processors | StepwiseProcessors | None]:
         if statistics_tendencies is None:
             return None, None
 
         if "lead_times" not in statistics_tendencies:
-            return self._build_processor_pair(processors_configs, data_indices, statistics_tendencies)
+            return self._build_processor_pair(
+                processors_configs,
+                data_indices,
+                statistics_tendencies,
+                graph_data,
+            )
 
         lead_times = list(statistics_tendencies.get("lead_times") or [])
         if self.n_step_output == 1:
             step_stats = statistics_tendencies.get(lead_times[0]) if lead_times else None
             stats_for_tendencies = step_stats or statistics_tendencies
-            return self._build_processor_pair(processors_configs, data_indices, stats_for_tendencies)
+            return self._build_processor_pair(
+                processors_configs,
+                data_indices,
+                stats_for_tendencies,
+                graph_data,
+            )
 
         pre_processors_tendencies = StepwiseProcessors(lead_times)
         post_processors_tendencies = StepwiseProcessors(lead_times)
@@ -179,7 +188,12 @@ class AnemoiModelInterface(torch.nn.Module):
             step_stats = statistics_tendencies.get(lead_time)
             if step_stats is None:
                 continue
-            pre_step, post_step = self._build_processor_pair(processors_configs, data_indices, step_stats)
+            pre_step, post_step = self._build_processor_pair(
+                processors_configs,
+                data_indices,
+                step_stats,
+                graph_data,
+            )
             pre_processors_tendencies.set(lead_time, pre_step)
             post_processors_tendencies.set(lead_time, post_step)
         return pre_processors_tendencies, post_processors_tendencies
