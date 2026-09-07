@@ -18,6 +18,8 @@ from anemoi.models.layers.spectral_de393 import (
     CartesianInverseRealSHT,
     OctahedralRealSHT,
     OctahedralInverseRealSHT,
+    HEALPixRealSHT,
+    HEALPixInverseRealSHT,
 )
 
 
@@ -142,6 +144,11 @@ class BasicOrnsteinResidual(Module):
             self.values_reshape_for = f"... values var -> ... var values"
             self.values_reshape_inv = f"... var values -> ... values var"
             self.kwargs_reshape_for = {}
+        elif grid == "healpix":
+            self.isht = HEALPixInverseRealSHT((nlat + 1) // 4, lmax, lmax)
+            self.values_reshape_for = f"... values var -> ... var values"
+            self.values_reshape_inv = f"... var values -> ... values var"
+            self.kwargs_reshape_for = {}
         else:
             self.isht = CartesianInverseRealSHT(nlat, nlon, lmax, grid)
             self.values_reshape_for = f"... ({node_order.replace("-", " ")}) var -> ... var lat lon"
@@ -231,6 +238,10 @@ class CompleteOrnsteinResidual(BasicOrnsteinResidual):
         if grid == "octahedral":
             self.x_fsht = OctahedralRealSHT(nlat)
             self.x_isht = OctahedralInverseRealSHT(nlat, self.x_fsht.lmax, self.x_fsht.mmax)
+        elif grid == "healpix":
+            nside = (nlat + 1) // 4
+            self.x_fsht = HEALPixRealSHT(nside)
+            self.x_isht = HEALPixInverseRealSHT(nside, self.x_fsht.lmax, self.x_fsht.mmax)
         else:
             self.x_fsht = CartesianRealSHT(nlat, nlon, grid)
             self.x_isht = CartesianInverseRealSHT(nlat, nlon, self.x_fsht.lmax, grid)
