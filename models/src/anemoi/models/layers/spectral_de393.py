@@ -511,7 +511,7 @@ class HEALPixRealSHT(Module):
 
         super().__init__()
 
-        self.lmax = lmax or 4 * nside - 1
+        self.lmax = lmax or 2 * nside + 1
         self.mmax = mmax or 2 * nside + 1
         self.nside = nside
 
@@ -649,7 +649,7 @@ class HEALPixInverseRealSHT(Module):
 
         rl = torch.einsum("...lm, mlk -> ...km", x[..., 0], self.pct.to(x.dtype))
         im = torch.einsum("...lm, mlk -> ...km", x[..., 1], self.pct.to(x.dtype))
-        xs = torch.stack((rl, im), -1)
+        xs = torch.stack((rl, im), -1).to(x.dtype)
 
         x = torch.view_as_complex(xs)
         f = torch.exp(1j * self.offset.to(x.dtype))
