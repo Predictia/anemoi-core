@@ -441,6 +441,7 @@ class NearestNeighbourImputer(BaseImputer):
         return (
             self._saved_nn_all2notnan
             if torch.equal(nan_locations, self._saved_nanloc)
+            and self._saved_nn_all2notnan is not None
             else self.get_new_nn_all2notnan(nan_locations)
         )
 
